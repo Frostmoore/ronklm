@@ -5,8 +5,8 @@
 > aprire i file**. Se per sapere la firma di un metodo bisogna leggere il sorgente,
 > questo documento ha fallito.
 >
-> **Stato**: aggiornato a fine **Fase 3** (2026-07-18). Copre corpus, tokenizer,
-> dataset, bigram a conteggio e neurale, motore di autograd, test. Piano in
+> **Stato**: aggiornato a fine **Fase 4** (2026-07-18). Copre corpus, tokenizer,
+> dataset, bigram (conteggio/neurale), autograd, nn/optim, MLP, test. Piano in
 > [`plan_ronklm_system.md`](plan_ronklm_system.md).
 >
 > **Verifica meccanica firme**: eseguita a fine Fase 0 con estrazione `def`/`class`
@@ -26,6 +26,9 @@
 | Bigram per conteggio (Fase 1) | `BigramCount` in [`ronklm/models/bigram_count.py`](../ronklm/models/bigram_count.py) |
 | Bigram neurale (Fase 2) | `BigramNeural` in [`ronklm/models/bigram_neural.py`](../ronklm/models/bigram_neural.py) |
 | Autograd (`Tensor`, backward) | [`ronklm/autograd.py`](../ronklm/autograd.py) — `Tensor`, `cross_entropy` (Fase 3) |
+| Layer riusabili (Module/Linear/Embedding) | [`ronklm/nn.py`](../ronklm/nn.py) (Fase 4) |
+| Ottimizzatori (SGD/AdamW) | [`ronklm/optim.py`](../ronklm/optim.py) (Fase 4) |
+| MLP a contesto (Fase 4) | `MLP` in [`ronklm/models/mlp.py`](../ronklm/models/mlp.py) |
 | Eseguire tutti i test | `python run_tests.py` (radice) |
 | Runner di test senza pytest | [`tests/_runner.py`](../tests/_runner.py) |
 | Versione del pacchetto | `__version__` in [`ronklm/__init__.py`](../ronklm/__init__.py) |
@@ -46,17 +49,21 @@ RonkLM/
 │   ├── tokenizer.py           # CharTokenizer
 │   ├── dataset.py             # load_text(), Dataset
 │   ├── autograd.py            # ronkgrad: Tensor + cross_entropy (Fase 3)
+│   ├── nn.py                  # Module, Linear, Embedding (Fase 4)
+│   ├── optim.py               # SGD, AdamW (Fase 4)
 │   └── models/
 │       ├── __init__.py
 │       ├── bigram_count.py    # BigramCount (Fase 1)
-│       └── bigram_neural.py   # BigramNeural (Fase 2)
+│       ├── bigram_neural.py   # BigramNeural (Fase 2)
+│       └── mlp.py             # MLP (Fase 4)
 ├── tests/
 │   ├── _runner.py             # run(namespace) -> n_fallimenti
 │   ├── test_tokenizer.py      # 8 test
 │   ├── test_dataset.py        # 8 test
 │   ├── test_bigram_count.py   # 6 test
 │   ├── test_bigram_neural.py  # 5 test
-│   └── test_autograd.py       # 18 gradient check
+│   ├── test_autograd.py       # 23 gradient check
+│   └── test_mlp.py            # 5 test
 ├── run_tests.py               # lancia tutti i tests/test_*.py
 ├── explain.md                 # libro di testo: spiegazione didattica per fase
 ├── requirements.txt           # numpy (+ matplotlib opz., torch dalla Fase 9)
@@ -65,11 +72,11 @@ RonkLM/
 └── .gitignore
 ```
 
-**NON esiste ancora** (per evitare ricerche a vuoto): nessun layer riusabile
-(`ronklm/nn.py` con `Module`/`Linear`/`Embedding`/`LayerNorm`), nessun ottimizzatore
-(`ronklm/optim.py` con SGD/AdamW come classi), nessun MLP/attention/GPT. Arrivano
-dalle Fasi 4+. Esistono: bigram a conteggio (Fase 1), bigram neurale con gradiente a
-mano (Fase 2), motore di autograd `ronkgrad` (Fase 3).
+**NON esiste ancora** (per evitare ricerche a vuoto): nessun `LayerNorm` (arriva in
+Fase 6, in `nn.py`), nessuna attention (`models/attention.py`, Fase 5), nessun blocco
+transformer (`models/block.py`, Fase 6), nessun GPT (`models/gpt.py`, Fase 7). Il
+`Sequential` citato nel piano non è stato necessario. Esistono: bigram conteggio (1),
+bigram neurale (2), autograd (3), nn+optim+MLP (4).
 
 ---
 
@@ -230,10 +237,57 @@ Funzione di modulo:
 |---|---|---|
 | `cross_entropy` | `(logits: Tensor, targets: np.ndarray) -> Tensor` | CE media fusa/stabile; backward: `(softmax − onehot)/B` |
 
-**Validazione**: 18 gradient check < 1e-5; riproduce il gradiente manuale della Fase 2
+Operazioni aggiunte in Fase 4 (per embedding, attention, layernorm):
+
+| Metodo | Firma | Effetto (backward) |
+|---|---|---|
+| `reshape` | `(self, *shape) -> Tensor` | cambia forma; backward: reshape inverso |
+| `transpose` | `(self, axis1, axis2) -> Tensor` | scambia due assi; backward: ri-scambia |
+| `gather_rows` | `(self, idx: np.ndarray) -> Tensor` | seleziona righe (embedding); backward: scatter-add |
+| `masked_fill` | `(self, mask: np.ndarray, value: float) -> Tensor` | mette `value` dove `mask`; backward: 0 sulle celle mascherate |
+| `var` | `(self, axis, keepdims=True) -> Tensor` | varianza (composita mean+pow) per LayerNorm |
+
+**Validazione**: 23 gradient check < 1e-5; riproduce il gradiente manuale della Fase 2
 a **2e-17** (precisione macchina).
 
-### 3.6 `data/prepare_corpus.py` — script di preparazione corpus
+### 3.6 `ronklm/nn.py` — layer riusabili
+
+| Classe/metodo | Firma | Effetto |
+|---|---|---|
+| `Module.parameters` | `(self) -> list[Tensor]` | raccoglie ricorsivamente i Tensor-parametro (da `__dict__`) |
+| `Module.zero_grad` | `(self) -> None` | azzera i gradienti dei parametri |
+| `Module.__call__` | `(self, *a, **k)` | invoca `forward` |
+| `Linear.__init__` | `(self, n_in, n_out, rng, bias=True)` | `W` init `1/√n_in`, `b` a zeri |
+| `Linear.forward` | `(self, x: Tensor) -> Tensor` | `x @ W (+ b)` |
+| `Embedding.__init__` | `(self, num, dim, rng, std=1.0)` | tabella `weight` `(num, dim)` |
+| `Embedding.forward` | `(self, idx: np.ndarray) -> Tensor` | `weight.gather_rows(idx)` |
+
+### 3.7 `ronklm/optim.py` — ottimizzatori
+
+| Classe/metodo | Firma | Effetto |
+|---|---|---|
+| `SGD.__init__` | `(self, params, lr)` | — |
+| `SGD.step` | `(self) -> None` | `p.data -= lr * p.grad` |
+| `AdamW.__init__` | `(self, params, lr=3e-3, betas=(0.9,0.999), eps=1e-8, weight_decay=0.0)` | inizializza momenti `m`, `v` |
+| `AdamW.step` | `(self) -> None` | momento + scaling adattivo + bias-correction + weight decay disaccoppiato |
+| `*.zero_grad` | `(self) -> None` | azzera i gradienti |
+
+### 3.8 `ronklm/models/mlp.py` — classe `MLP`
+
+MLP a contesto fisso (Fase 4): `Embedding → concat → Linear+tanh → Linear`.
+
+| Metodo | Firma | Effetto |
+|---|---|---|
+| `__init__` | `(self, vocab_size, block_size, n_embd, n_hidden, rng)` | crea `emb`, `h`, `head` |
+| `logits` | `(self, x_idx: np.ndarray) -> Tensor` | contesto `(B,T)` → logits `(B, vocab)` |
+| `loss` | `(self, x_idx, y_idx) -> Tensor` | cross-entropy (Tensor, per backward) |
+| `targets_from_batch` | `(Y: np.ndarray) -> np.ndarray` *(staticmethod)* | `Y[:, -1]` (char dopo il contesto) |
+| `nll` | `(self, data, block_size, rng, n_batches=20, batch_size=256) -> float` | NLL media su più batch |
+| `generate` | `(self, rng, n, tokenizer=None, seed_ctx=None) -> list[int]` | generazione con contesto scorrevole |
+
+**Numeri**: NLL val **1.897** (< bigram 2.346), train **1.81** (overfitting gap).
+
+### 3.9 `data/prepare_corpus.py` — script di preparazione corpus
 
 Funzioni (tutte a livello di modulo; script eseguibile con `python data/prepare_corpus.py [--force]`):
 
@@ -292,7 +346,18 @@ argomenti di funzione con default:
 
 ## 6. Catalogo dei test
 
-Runner: `python run_tests.py` (nessun pytest richiesto). **51 test, tutti verdi.**
+Runner: `python run_tests.py` (nessun pytest richiesto). **61 test, tutti verdi.**
+
+`tests/test_mlp.py` (5):
+
+| Test | Cosa dimostra |
+|---|---|
+| `test_parameters_collected` | `Module.parameters()` raccoglie tutti e 5 i tensori |
+| `test_logits_shape_and_scalar_loss` | logits `(B, vocab)`, loss scalare |
+| `test_all_params_get_gradient` | dopo backward ogni parametro ha gradiente ≠ 0 |
+| `test_training_decreases_loss` | l'addestramento (SGD) fa scendere la loss |
+| `test_mlp_beats_bigram_on_val` | NLL val < 2.2 → batte il bigram (milestone M2) |
+
 
 `tests/test_autograd.py` (18): un gradient check per ogni operazione — `add`
 (broadcast), `sub`, `mul` (broadcast), `div`, `pow`, `matmul` 2D e batch, `sum`

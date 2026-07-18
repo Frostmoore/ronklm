@@ -242,6 +242,62 @@ class Tensor:
         out._backward = _backward
         return out
 
+    # ---- forma e selezione ------------------------------------------------
+    def reshape(self, *shape) -> "Tensor":
+        """Cambia la forma senza toccare i dati (serve a concatenare gli embedding)."""
+        out = Tensor(self.data.reshape(*shape), (self,), "reshape")
+
+        def _backward():
+            self.grad += out.grad.reshape(self.data.shape)
+
+        out._backward = _backward
+        return out
+
+    def transpose(self, axis1: int, axis2: int) -> "Tensor":
+        """Scambia due assi (per q @ k^T nell'attention). Il backward ri-scambia."""
+        out = Tensor(np.swapaxes(self.data, axis1, axis2), (self,), "transpose")
+
+        def _backward():
+            self.grad += np.swapaxes(out.grad, axis1, axis2)
+
+        out._backward = _backward
+        return out
+
+    def gather_rows(self, idx: np.ndarray) -> "Tensor":
+        """Seleziona righe di questa matrice (V, C) secondo `idx` (interi, forma
+        qualsiasi) -> risultato (forma di idx, C). E' l'operazione dell'Embedding.
+
+        Backward: ogni riga selezionata riceve il gradiente del suo output; se una
+        riga e' selezionata piu' volte, i contributi si SOMMANO (np.add.at, come nel
+        bigram). E' la scatter-add, l'inverso della gather.
+        """
+        out = Tensor(self.data[idx], (self,), "gather")
+
+        def _backward():
+            np.add.at(self.grad, idx, out.grad)
+
+        out._backward = _backward
+        return out
+
+    def masked_fill(self, mask: np.ndarray, value: float) -> "Tensor":
+        """Mette `value` dove `mask` e' True (per la maschera causale: -inf sopra la
+        diagonale, prima della softmax). Il gradiente non passa dalle celle mascherate."""
+        data = np.where(mask, value, self.data)
+        out = Tensor(data, (self,), "masked_fill")
+
+        def _backward():
+            self.grad += np.where(mask, 0.0, out.grad)
+
+        out._backward = _backward
+        return out
+
+    def var(self, axis: int, keepdims: bool = True) -> "Tensor":
+        """Varianza (popolazione, ddof=0) lungo `axis`, costruita da mean e potenza:
+        var = mean((x - mean(x))^2). Backward automatico dai primitivi. Serve a LayerNorm."""
+        mu = self.mean(axis=axis, keepdims=True)
+        diff = self + (-mu)
+        return (diff * diff).mean(axis=axis, keepdims=keepdims)
+
     # ---- backpropagation --------------------------------------------------
     def backward(self) -> None:
         """Calcola i gradienti di questo tensore (di solito la loss) rispetto a tutti

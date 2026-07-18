@@ -184,6 +184,44 @@ def test_small_mlp_composite():
     grad_check(lambda: cross_entropy((x @ W1).tanh() @ W2, targets), [x, W1, W2])
 
 
+def test_reshape():
+    r = _rng()
+    a = Tensor(r.normal(size=(2, 3, 4)))
+    w = r.normal(size=(2, 12))
+    grad_check(lambda: (a.reshape(2, 12) * Tensor(w)).sum(), [a])
+
+
+def test_transpose():
+    r = _rng()
+    a = Tensor(r.normal(size=(2, 3, 4)))
+    w = r.normal(size=(2, 4, 3))
+    grad_check(lambda: (a.transpose(1, 2) * Tensor(w)).sum(), [a])
+
+
+def test_gather_rows():
+    # embedding: seleziona righe di una tabella (V, C) con indici (B, T)
+    r = _rng()
+    table = Tensor(r.normal(size=(5, 3)))  # (V=5, C=3)
+    idx = np.array([[0, 2, 2], [1, 4, 0]])  # (B=2, T=3), con indici ripetuti
+    w = r.normal(size=(2, 3, 3))
+    grad_check(lambda: (table.gather_rows(idx) * Tensor(w)).sum(), [table])
+
+
+def test_masked_fill():
+    r = _rng()
+    a = Tensor(r.normal(size=(3, 3)))
+    mask = np.triu(np.ones((3, 3), dtype=bool), k=1)  # sopra la diagonale
+    w = r.normal(size=(3, 3))
+    # softmax dopo il mask, per un caso realistico di attention
+    grad_check(lambda: (a.masked_fill(mask, -1e9).softmax(-1) * Tensor(w)).sum(), [a])
+
+
+def test_var():
+    r = _rng()
+    a = Tensor(r.normal(size=(4, 6)))
+    grad_check(lambda: a.var(axis=-1).sum(), [a])
+
+
 if __name__ == "__main__":
     from _runner import run
 

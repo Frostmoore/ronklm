@@ -966,7 +966,14 @@ esattamente cosa fa ogni sua riga.
 
 ---
 
-## ☐ Fase 4 — MLP language model
+## ☑ Fase 4 — MLP language model  ✅ COMPLETATA (2026-07-18)
+
+> **Esito**: `nn.py` (Module/Linear/Embedding), `optim.py` (SGD/AdamW),
+> `models/mlp.py`. Esteso ronkgrad con reshape/transpose/gather_rows/masked_fill/
+> var (+5 gradient check, 23 su autograd). **NLL val 1.897 < bigram 2.346**
+> (milestone M2 ✓); train 1.81 vs val 1.90 (overfitting che emerge). Testo con
+> parole vere e nomi collodiani. 5 test MLP (61 totali). Branch `v1.6.0`.
+
 
 **Obiettivo didattico.** Rompere finalmente il limite del bigram: un contesto di
 **più caratteri**. Introduciamo i due mattoni che i transformer usano ovunque —
@@ -974,7 +981,7 @@ esattamente cosa fa ogni sua riga.
 curva train/val, overfitting, AdamW. Architettura di riferimento: il language
 model di Bengio et al. 2003, il paper che ha dato inizio ai LM neurali.
 
-### ☐ 4.1 — La libreria di layer (`nn.py`)
+### ☑ 4.1 — La libreria di layer (`nn.py`)
 
 **Cosa**: sopra `ronkgrad`, i mattoni riusabili: classe base `Module` (che sa
 elencare i propri parametri, ricorsivamente), `Linear(n_in, n_out)`,
@@ -995,7 +1002,7 @@ gradiente muore al primo passaggio. Con lo scaling `1/sqrt(n_in)` la varianza
 dell'output resta ~1 indipendentemente dalla larghezza. Vederemo l'effetto con un
 esperimento: istogramma delle attivazioni con e senza scaling corretto.
 
-### ☐ 4.2 — L'architettura MLP (`mlp.py`)
+### ☑ 4.2 — L'architettura MLP (`mlp.py`)
 
 **Cosa**: contesto di `block_size` caratteri (partiamo con 8) →
 `Embedding(vocab, n_embd)` per ciascuno → concatenazione dei vettori →
@@ -1031,7 +1038,7 @@ quartultima); allargare il contesto fa crescere linearmente i pesi del primo
 strato; e caratteri lontani devono comunque passare tutti dallo stesso collo di
 bottiglia. Il transformer nasce per rompere esattamente questa rigidità.
 
-### ☐ 4.3 — Il training vero: minibatch, train/val, overfitting
+### ☑ 4.3 — Il training vero: minibatch, train/val, overfitting
 
 **Cosa**: training con `ronkgrad`, batch da 32–64, valutazione periodica della
 loss su train E val, grafico delle due curve.
@@ -1045,7 +1052,7 @@ piccolo, regolarizzazione (il weight decay arriva in 4.4). La regola pratica da
 interiorizzare: **la sola loss che conta è quella di validazione** — quella di
 train si può sempre abbassare barando (memorizzando).
 
-### ☐ 4.4 — AdamW (`optim.py`)
+### ☑ 4.4 — AdamW (`optim.py`)
 
 **Cosa**: implementare `SGD` come classe pulita, e poi `AdamW` completo:
 momento del primo ordine (media mobile dei gradienti), momento del secondo ordine
@@ -1077,7 +1084,7 @@ Averlo scritto a mano significa che quando leggerai `torch.optim.AdamW(params,
 lr=3e-4, betas=(0.9, 0.95), weight_decay=0.1)` in un repo vero, ogni argomento
 sarà un numero di cui conosci il meccanismo dall'interno.
 
-### ☐ 4.5 — Confronto sperimentale e generazione
+### ☑ 4.5 — Confronto sperimentale e generazione
 
 **Cosa**: tabella NLL val — bigram contato / bigram neurale / MLP (che deve vincere
 nettamente); campioni di testo generato a confronto; mini-studio dell'effetto di

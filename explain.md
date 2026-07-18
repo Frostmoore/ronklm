@@ -67,6 +67,16 @@
   - [3.8 cross_entropy fusa: stabilità ed eleganza](#sec-3-8)
   - [3.9 La prova: 18 gradient check e la precisione macchina](#sec-3-9)
   - [3.10 Glossario Fase 3 / cosa arriva in Fase 4](#sec-3-10)
+- [Fase 4 — L'MLP: contesto, embedding e AdamW](#fase-4)
+  - [4.0 L'idea: rompere il limite di un solo carattere](#sec-4-0)
+  - [4.1 L'infrastruttura: Module, Linear, Embedding](#sec-4-1)
+  - [4.2 Gli embedding: comprimere la tabella impossibile](#sec-4-2)
+  - [4.3 Lo strato nascosto: rilevare combinazioni](#sec-4-3)
+  - [4.4 L'inizializzazione dei pesi: 1/√n](#sec-4-4)
+  - [4.5 AdamW, l'ottimizzatore dei GPT veri](#sec-4-5)
+  - [4.6 L'overfitting, dal vivo](#sec-4-6)
+  - [4.7 I numeri e il testo generato](#sec-4-7)
+  - [4.8 Il limite dell'MLP e cosa arriva in Fase 5](#sec-4-8)
 
 ---
 
@@ -1869,3 +1879,275 @@ vivo.
 ---
 
 *Fine del capitolo Fase 3.*
+
+---
+
+<a name="fase-4"></a>
+# Fase 4 — L'MLP: contesto, embedding e AdamW
+
+Finalmente usiamo `ronkgrad` per costruire un modello **vero**, e per la prima volta
+rompiamo il limite del bigram: guardiamo **più caratteri** di contesto, non uno solo.
+Introduciamo i due mattoni che i transformer useranno ovunque — gli **embedding** e
+gli **strati nascosti** — più l'ottimizzatore **AdamW**, lo stesso dei GPT reali. E
+incontriamo, dal vivo, la malattia numero uno del machine learning: l'**overfitting**.
+
+📁 File: [`ronklm/nn.py`](ronklm/nn.py), [`ronklm/optim.py`](ronklm/optim.py),
+[`ronklm/models/mlp.py`](ronklm/models/mlp.py)
+
+---
+
+<a name="sec-4-0"></a>
+## 4.0 L'idea: rompere il limite di un solo carattere
+
+Il bigram guardava un carattere. L'MLP (Multi-Layer Perceptron, "percettrone
+multistrato") guarda gli ultimi `block_size` caratteri — noi useremo 8. L'architettura,
+ispirata al primo language model neurale della storia (Bengio et al., 2003):
+
+```
+contesto: 8 indici di carattere  (B, 8)
+   │
+   ▼  Embedding: ogni carattere diventa un vettore denso
+   (B, 8, n_embd)
+   │
+   ▼  concatena gli 8 vettori in uno solo
+   (B, 8·n_embd)
+   │
+   ▼  Linear + tanh   ← lo "strato nascosto"
+   (B, n_hidden)
+   │
+   ▼  Linear          ← la "testa"
+   (B, vocab)   = logits del prossimo carattere
+```
+
+Il forward è tutto qui (dal codice), ed è leggibile riga per riga:
+
+```python
+e = self.emb(x_idx)                  # (B, 8, n_embd)
+flat = e.reshape(B, 8 * n_embd)      # concatena
+hidden = self.h(flat).tanh()         # (B, n_hidden)
+return self.head(hidden)             # (B, vocab)
+```
+
+> **🔧 Nel codice: e il backward?** Non c'è. Non lo scriviamo. Grazie a `ronkgrad`
+> (Fase 3), ci basta comporre operazioni che sanno già differenziarsi (`@`, `+`,
+> `tanh`, `reshape`, `gather_rows`, `cross_entropy`), e il gradiente di *tutta* la
+> rete arriva gratis chiamando `loss.backward()`. È il dividendo promesso: da qui in
+> poi scriviamo solo il forward.
+
+---
+
+<a name="sec-4-1"></a>
+## 4.1 L'infrastruttura: Module, Linear, Embedding
+
+Prima del modello, tre mattoni riusabili in [`nn.py`](ronklm/nn.py) — l'equivalente di
+`torch.nn`, ma trasparente.
+
+**`Module`** è la classe base. La sua unica magia è `parameters()`: raccoglie
+*ricorsivamente* tutti i tensori-parametro del modulo e dei suoi sotto-moduli.
+
+> **📖 Concetto: perché serve.** Il GPT finale avrà decine di sotto-componenti
+> annidati, ognuno coi suoi pesi. L'ottimizzatore ha bisogno della **lista completa**
+> dei parametri da aggiornare. Raccoglierla a mano è il modo garantito di
+> dimenticarne uno — che quindi non verrebbe mai addestrato, restando congelato ai
+> valori casuali iniziali: un bug silenzioso classico. `Module.parameters()` che
+> ispeziona automaticamente gli attributi risolve il problema una volta per tutte. È
+> esattamente il ruolo di `nn.Module` in PyTorch. (Abbiamo un test,
+> `test_all_params_get_gradient`, che verifica che *ogni* parametro riceva gradiente:
+> il modo meccanico di scoprire un peso scollegato.)
+
+**`Linear`** è lo strato lineare `y = x @ W + b`: il mattone più comune di ogni rete.
+
+**`Embedding`** è la tabella che trasforma indici in vettori. È il cuore concettuale
+della fase, e merita la sua sezione.
+
+---
+
+<a name="sec-4-2"></a>
+## 4.2 Gli embedding: comprimere la tabella impossibile
+
+Ricordi la promessa lasciata in sospeso in [Fase 1.1](#sec-1-1)? Il conteggio non
+scala: una tabella per 10 caratteri di contesto avrebbe più celle che stelle
+nell'universo. Gli embedding sono *la risposta* a quel problema.
+
+> **📖 Concetto: cos'è un embedding.** Invece di rappresentare un carattere come un
+> one-hot lungo 69 (tutto zeri e un uno), gli diamo un **vettore denso di pochi numeri
+> reali** (noi ne usiamo 24) — e quei numeri sono **parametri addestrabili**, che il
+> training aggiusta. La tabella `Embedding` è una matrice `(69, 24)`: la riga `i` è il
+> vettore del carattere `i`.
+
+Due conseguenze profonde:
+
+1. **Compressione.** 69 caratteri descritti da 24 numeri ciascuno, invece che da
+   vettori lunghi 69. E il contesto di 8 caratteri diventa `8 × 24 = 192` numeri, non
+   `8 × 69`. La "tabella impossibile" del conteggio è sostituita da una *funzione* con
+   pochi parametri che la approssima.
+
+2. **Geometria della somiglianza.** Siccome i vettori sono appresi, il training è
+   *libero di avvicinare* tra loro i caratteri che si comportano in modo simile — per
+   esempio le vocali, o le cifre. Così ciò che il modello impara su `a` si trasferisce
+   in parte a `e`. Il conteggio non poteva farlo: ogni riga della sua tabella era un
+   universo isolato. (Nei LLM veri, a livello di parola, è la stessa idea che produce
+   il famoso "re − uomo + donna ≈ regina": la geometria appresa cattura relazioni
+   semantiche.)
+
+> **🔧 Nel codice: onehot @ W diventa gather_rows.** In [Fase 2.1](#sec-2-1) avevamo
+> osservato che "moltiplicare un one-hot per una matrice = selezionare una riga".
+> L'`Embedding` rende questa osservazione ufficiale ed efficiente: invece di costruire
+> one-hot e moltiplicare, selezioniamo direttamente le righe con `gather_rows` (che
+> abbiamo aggiunto a ronkgrad, col suo backward "scatter-add": ogni riga usata riceve
+> la somma dei gradienti dei punti in cui è stata usata). Stesso risultato, molto più
+> veloce. Gli embedding *non sono* un'idea nuova: sono la selezione di riga di Fase 2,
+> resa protagonista.
+
+---
+
+<a name="sec-4-3"></a>
+## 4.3 Lo strato nascosto: rilevare combinazioni
+
+Dopo gli embedding concatenati, c'è un `Linear` seguito da `tanh`: lo **strato
+nascosto**. Perché serve?
+
+> **📖 Concetto: senza lo strato nascosto, sarebbe ancora quasi una tabella.** Se
+> proiettassimo gli embedding concatenati *direttamente* sui logit (una sola
+> trasformazione lineare), il modello potrebbe solo *sommare contributi indipendenti*
+> di ciascuna posizione. Lo strato nascosto con la non-linearità `tanh` gli permette
+> invece di rilevare **combinazioni**: "c'è una `q` in penultima posizione **E** una
+> `u` in ultima", oppure "le ultime tre lettere formano `-are`". Sono *feature
+> composite* che nessuna trasformazione lineare può esprimere (è di nuovo il discorso
+> della [sezione 3.7](#sec-3-7): senza non-linearità la profondità è finta). È qui che
+> la rete smette di essere una tabella compressa e comincia davvero a *calcolare*.
+
+---
+
+<a name="sec-4-4"></a>
+## 4.4 L'inizializzazione dei pesi: 1/√n
+
+Un dettaglio del `Linear` che sembra pignoleria ma non lo è: i pesi si inizializzano
+con deviazione standard `1/√n_in` (dove `n_in` è il numero di ingressi).
+
+> **📖 Concetto: perché scalare l'init con 1/√n.** L'output di un neurone è la somma
+> di `n_in` prodotti. Se ogni peso avesse una varianza fissa, la varianza della somma
+> crescerebbe *proporzionalmente* a `n_in` (è una proprietà delle somme di variabili
+> indipendenti). Con `n_in = 192` ingressi, le attivazioni sarebbero ~14 volte più
+> "larghe" del dovuto. Perché è un problema? Perché la `tanh` **satura**: per input
+> grandi si appiattisce a ±1, dove la sua derivata è ~0 → **il gradiente muore** al
+> primo passaggio, e la rete non impara. Scalando i pesi con `1/√n_in`, la varianza
+> dell'output resta ~1 indipendentemente dalla larghezza, e la `tanh` lavora nella sua
+> zona "viva". È una delle scoperte (Glorot 2010, He 2015) che hanno reso addestrabili
+> le reti profonde.
+
+---
+
+<a name="sec-4-5"></a>
+## 4.5 AdamW, l'ottimizzatore dei GPT veri
+
+In Fase 2 aggiornavamo i pesi con la regola più semplice: `W -= lr * grad` (SGD puro).
+Funziona, ma è primitivo. In [`optim.py`](ronklm/optim.py) implementiamo **AdamW**,
+lo stesso ottimizzatore con cui si addestrano GPT-3, GPT-4 e praticamente ogni LLM
+moderno. Vale la pena capirlo pezzo per pezzo, perché ogni pezzo risolve un problema
+concreto di SGD.
+
+> **📖 Momentum (il primo momento).** I gradienti da minibatch sono *rumorosi*
+> ([sezione 2.4](#sec-2-4)): ogni batch dà una stima leggermente diversa. AdamW tiene
+> una **media mobile** dei gradienti nel tempo: questo filtra il rumore e accumula
+> "velocità" nelle direzioni costanti. L'immagine: invece di un escursionista che a
+> ogni passo riparte da fermo, una palla che rotola giù dalla valle, che mantiene lo
+> slancio.
+
+> **📖 Scaling adattivo (il secondo momento).** Parametri diversi ricevono gradienti
+> di grandezza diversissima: l'embedding di una lettera rara riceve segnale
+> raramente; i pesi della testa, sempre. Un unico `lr` per tutti è per forza sbagliato
+> per qualcuno. AdamW tiene anche una media mobile dei *gradienti al quadrato*, e
+> divide il passo di ogni peso per la sua radice: così **ogni parametro ottiene di
+> fatto il suo learning rate su misura**, grande dove i gradienti sono piccoli e
+> viceversa.
+
+> **📖 Bias-correction.** Le due medie mobili partono da zero, quindi nei primissimi
+> passi sono *sottostimate*. Senza correzione, i primi passi sarebbero distorti. La
+> divisione per `(1 − β^t)` compensa esattamente questo transitorio iniziale.
+
+> **📖 Weight decay disaccoppiato (la "W" di AdamW).** A ogni passo, i pesi vengono
+> anche spinti dolcemente verso zero. È **regolarizzazione**: pesi piccoli =
+> funzioni più semplici = meno overfitting (è la stessa filosofia dello smoothing di
+> [Fase 1.2](#sec-1-2), in altra veste). Il dettaglio sottile: in Adam "classico"
+> questo decay finiva *dentro* il gradiente e veniva ri-scalato dal meccanismo
+> adattivo, indebolendolo; AdamW lo applica *fuori*, direttamente ai pesi — ed è per
+> questo che l'industria usa AdamW e non Adam.
+
+Averlo scritto a mano significa che quando leggerai, in un repo vero,
+`torch.optim.AdamW(params, lr=3e-4, betas=(0.9, 0.95), weight_decay=0.1)`, ogni
+argomento sarà un numero di cui conosci il meccanismo dall'interno.
+
+---
+
+<a name="sec-4-6"></a>
+## 4.6 L'overfitting, dal vivo
+
+In [Fase 1.6](#sec-1-6) avevamo notato che il bigram *non* faceva overfitting: train e
+val avevano la stessa NLL, perché una tabella fissa è troppo "povera" per memorizzare.
+L'MLP ha decine di migliaia di parametri, e per la prima volta vediamo il fenomeno.
+
+> **📖 Concetto: memorizzare invece di generalizzare.** Con abbastanza capacità, la
+> rete può iniziare a *memorizzare* pezzi specifici di Pinocchio invece di imparare
+> regole generali dell'italiano. Sul training sembra sempre più brava; ma su testo
+> nuovo (la validation) il miglioramento rallenta o si ferma. Il divario tra la NLL di
+> train e quella di val è la **firma dell'overfitting**.
+
+Nei nostri numeri lo si vede nascere: **train 1.81, val 1.90**. Il modello è
+leggermente più bravo sul testo che ha visto che su quello nuovo. È ancora un divario
+piccolo (il modello è modesto), ma è *reale* e crescerebbe allenando più a lungo o con
+un modello più grande. I rimedi classici — più dati, modello più piccolo,
+regolarizzazione (il weight decay di AdamW) — sono esattamente ciò che governeremo in
+Fase 8. La regola operativa da interiorizzare: **la sola loss che conta è quella di
+validation**; quella di train si può sempre abbassare "barando" (memorizzando).
+
+---
+
+<a name="sec-4-7"></a>
+## 4.7 I numeri e il testo generato
+
+```
+                     bigram    MLP
+NLL validation       2.346     1.897      ← guardare 8 caratteri invece di 1 paga
+NLL train            2.334     1.81       ← (il gap train/val = overfitting)
+```
+
+L'MLP abbassa nettamente la sorpresa: da ~2.35 a ~1.90 nats. E nel testo generato il
+salto si *vede*:
+
+```
+luspau trome, introva ibbecio ma
+cold'omestro:
+— Mi fiariventi.
+Maverattestro con vifendavento
+i burattino e titasse questo di fuoresono un grate fuino.
+```
+
+Rispetto al bigram sillabico, ora compaiono **parole vere** (`burattino`, `questo`,
+`un`), abbozzi di nomi collodiani (`Maverattestro` ≈ Maestro, `ceppetterse` ≈
+Geppetto), e la struttura dei dialoghi (`— Mi...`). Non è italiano coerente — il
+contesto è ancora solo 8 caratteri — ma è un balzo evidente rispetto a Fase 1.
+
+---
+
+<a name="sec-4-8"></a>
+## 4.8 Il limite dell'MLP e cosa arriva in Fase 5
+
+L'MLP ha un limite **strutturale**, ed è la molla che fa scattare i transformer:
+
+> **📖 Il contesto dell'MLP è rigido.** Guarda esattamente 8 caratteri, sempre, in
+> posizioni fisse concatenate. Tre conseguenze: (1) la rete deve imparare *da capo*,
+> per ogni posizione, come usare l'informazione lì contenuta — ciò che impara sulla
+> "terzultima posizione" non si trasferisce alla "quartultima"; (2) allargare il
+> contesto fa crescere *linearmente* i pesi del primo strato; (3) tutti i caratteri,
+> vicini e lontani, passano per lo stesso collo di bottiglia, indistinti.
+
+In **Fase 5** costruiremo la **self-attention**, che nasce per rompere esattamente
+questa rigidità: invece di un contesto fisso e concatenato, ogni posizione della
+sequenza deciderà **da sola, dinamicamente, a quali posizioni precedenti prestare
+attenzione e quanto** — con pesi calcolati dai dati stessi. È il cuore del transformer,
+e lo costruiremo da zero, una testa alla volta.
+
+---
+
+*Fine del capitolo Fase 4.*
