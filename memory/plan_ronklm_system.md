@@ -534,7 +534,14 @@ pronti per qualsiasi modello. Nessun modello esiste ancora — ed è giusto cos�
 
 ---
 
-## ☐ Fase 1 — Bigram per conteggio (nessun training)
+## ☑ Fase 1 — Bigram per conteggio (nessun training)  ✅ COMPLETATA (2026-07-18)
+
+> **Esito**: `BigramCount` in `ronklm/models/bigram_count.py`, 6 test verdi (28
+> totali). Numeri reali: **NLL uniforme 4.2341**, **NLL bigram train 2.3340 / val
+> 2.3455 nats**, perplexity val **10.44**. Verifica qualitativa: "dopo `q` → `u`"
+> al **93.3%**. Generazione: pseudo-italiano sillabico (doppie, vocali finali,
+> spazi giusti) — il massimo per chi vede 1 carattere. Branch `v1.3.0`.
+
 
 **Obiettivo didattico.** Costruire il language model più semplice che esista —
 guarda solo l'ultimo carattere — e con esso i tre concetti che reggono tutto il
@@ -543,7 +550,7 @@ neanche un gradiente: solo conteggi. Serve a separare i concetti (cosa vuol dire
 "modellare il linguaggio") dai meccanismi (come si addestra una rete): mischiarli
 è il modo classico di non capire né gli uni né gli altri.
 
-### ☐ 1.1 — La matrice dei conteggi
+### ☑ 1.1 — La matrice dei conteggi
 
 **Cosa**: `N`, matrice `(vocab_size, vocab_size)` di interi, dove `N[i, j]` = quante
 volte, nel corpus di train, al carattere `i` segue il carattere `j`. Si costruisce
@@ -560,7 +567,7 @@ delle stelle nell'universo osservabile. **Il conteggio non scala; le reti neural
 sono il modo di *comprimere* questa tabella impossibile in una funzione con pochi
 parametri.** Questa frase è metà del senso del deep learning.
 
-### ☐ 1.2 — Da conteggi a probabilità (con smoothing)
+### ☑ 1.2 — Da conteggi a probabilità (con smoothing)
 
 **Cosa**: `P = (N + 1) / (N + 1).sum(axis=1, keepdims=True)` — ogni riga divisa per
 la sua somma, dopo aver aggiunto 1 a tutti i conteggi.
@@ -585,7 +592,7 @@ con cui NumPy allinea shape diverse: va capito ora perché in Fase 3 dovremo
 calcolarci i gradienti *attraverso* il broadcasting, ed è il punto tecnicamente più
 insidioso dell'intero progetto.
 
-### ☐ 1.3 — Campionamento: la prima generazione
+### ☑ 1.3 — Campionamento: la prima generazione
 
 **Cosa**: partire da un carattere, leggere la sua riga di `P`, estrarre il
 successivo con `rng.choice(vocab_size, p=P[i])`, ripetere. Generare qualche
@@ -602,7 +609,7 @@ temperature e top-k: qui ne vediamo la forma pura.
 già le doppie, le vocali finali, spazi a frequenza giusta. Per un modello che vede
 1 carattere è il massimo teorico, e vederlo tara le aspettative per tutto il resto.
 
-### ☐ 1.4 — La loss: negative log-likelihood (NLL)
+### ☑ 1.4 — La loss: negative log-likelihood (NLL)
 
 **Cosa**: per ogni coppia consecutiva `(i → j)` del validation set, accumulare
 `-log(P[i, j])`; riportare la media. Calcolare anche i due riferimenti: modello
@@ -635,7 +642,7 @@ da portarsi dietro: NLL media ≈ "sorpresa media per carattere"; e-elevato-alla
 — e NLL(train) ≈ NLL(val), perché una tabella di bigrammi è troppo povera per
 overfittare: prima osservazione sperimentale del rapporto capacità/overfitting.
 
-### ☐ 1.5 — Creazione del `codebase_reference.md`
+### ☑ 1.5 — Creazione del `codebase_reference.md`
 
 Prima stesura dell'atlante secondo i criteri delle istruzioni globali (indice
 dove-sta-cosa, firme complete, tabelle, cosa NON esiste ancora). Da qui in poi si

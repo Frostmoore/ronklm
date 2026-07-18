@@ -34,6 +34,16 @@
   - [0.12 Le tre trappole, spiegate con l'autopsia](#sec-0-12)
   - [0.13 Glossario dei termini introdotti](#sec-0-13)
   - [0.14 Cosa sappiamo fare ora, e cosa arriva in Fase 1](#sec-0-14)
+- [Fase 1 — Il bigram: il primo language model](#fase-1)
+  - [1.0 L'idea: predire guardando un solo carattere](#sec-1-0)
+  - [1.1 La matrice dei conteggi](#sec-1-1)
+  - [1.2 Da conteggi a probabilità: normalizzare e lo smoothing](#sec-1-2)
+  - [1.3 Broadcasting: la regola che allinea le shape](#sec-1-3)
+  - [1.4 Generare testo: il campionamento autoregressivo](#sec-1-4)
+  - [1.5 La loss spiegata a fondo: negative log-likelihood](#sec-1-5)
+  - [1.6 I nostri numeri, letti uno per uno](#sec-1-6)
+  - [1.7 Il limite del bigram e perché è il punto di partenza giusto](#sec-1-7)
+  - [1.8 Glossario Fase 1 / cosa arriva in Fase 2](#sec-1-8)
 
 ---
 
@@ -732,5 +742,360 @@ la bussola di ogni addestramento futuro.
 
 ---
 
-*Fine del capitolo Fase 0. Il prossimo capitolo (Fase 1) verrà aggiunto qui sotto,
-mantenendo l'indice in cima aggiornato.*
+<a name="fase-1"></a>
+# Fase 1 — Il bigram: il primo language model
+
+Finalmente costruiamo un modello. Il più semplice che esista: guarda **solo l'ultimo
+carattere** e predice il prossimo. E lo fa **contando**, non addestrando — nessun
+gradiente, nessuna rete. Perché partire da qualcosa di così stupido? Perché ci
+permette di incontrare, in isolamento e nella loro forma più pura, i tre concetti su
+cui poggia *tutto* il resto: la **distribuzione sul prossimo carattere**, il
+**campionamento** (generare testo) e soprattutto la **loss** (la misura di bravura).
+Separare i concetti dai meccanismi (il training verrà in Fase 2) è il modo di capire
+davvero entrambi.
+
+📁 File: [`ronklm/models/bigram_count.py`](ronklm/models/bigram_count.py)
+
+---
+
+<a name="sec-1-0"></a>
+## 1.0 L'idea: predire guardando un solo carattere
+
+"Bigram" significa "coppia di caratteri". L'assunzione del modello è brutalmente
+semplice:
+
+> *La probabilità del prossimo carattere dipende **solo** dal carattere corrente,
+> non da tutto ciò che c'è prima.*
+
+Cioè: per predire cosa viene dopo la `q`, il bigram guarda *solo* la `q` e ignora
+tutto il resto della frase. È un'assunzione falsa (il contesto conta eccome!), ma è
+un punto di partenza onesto e sorprendentemente informativo — l'italiano ha
+regolarità locali fortissime (dopo `q` viene quasi sempre `u`) che perfino questo
+modellino cattura.
+
+Come impara queste probabilità? Nel modo più diretto immaginabile: **le conta** nel
+testo. "Nel corpus, dopo `q`, quante volte è venuta `u`? E `a`? E `z`?"
+
+---
+
+<a name="sec-1-1"></a>
+## 1.1 La matrice dei conteggi
+
+Il cuore del modello è una tabella quadrata `N` di dimensione `(vocab × vocab)`,
+cioè 69×69 nel nostro caso. La regola:
+
+```
+N[i, j] = quante volte, in tutto il testo di training, al carattere i è seguito j
+```
+
+La riga `N[i]` è quindi la "fotografia" di cosa viene dopo il carattere `i`. La riga
+della `q` avrà un picco enorme sulla colonna della `u` e quasi zero altrove.
+
+Nel codice la costruiamo con una singola operazione vettorizzata:
+
+```python
+a = data[:-1]   # tutti i caratteri "da"  (tutti tranne l'ultimo)
+b = data[1:]    # tutti i caratteri "a"   (tutti tranne il primo)
+np.add.at(self.N, (a, b), 1)
+```
+
+> **🔧 Nel codice: cos'è `np.add.at`.** `a` e `b` sono due lunghi vettori allineati:
+> `(a[k], b[k])` è la k-esima coppia consecutiva del testo. `np.add.at(N, (a, b), 1)`
+> fa `N[a[k], b[k]] += 1` per ogni `k`, ma tutto in C, in un colpo solo. Perché non
+> un normale `N[a, b] += 1`? Perché quella forma "ingenua" sbaglia quando la stessa
+> coppia compare più volte (un difetto sottile di NumPy con indici ripetuti):
+> conterebbe una volta sola. `np.add.at` è la versione che accumula correttamente
+> gli indici ripetuti. Contare 240.000 coppie così è istantaneo.
+
+> **📖 Concetto: perché il conteggio non scala (e perché ci servono le reti).**
+> Funziona benissimo per 1 carattere di contesto: la tabella ha 69×69 ≈ 4.700 celle.
+> Ma se volessimo guardare 2 caratteri di contesto, servirebbe una tabella 69×69×69;
+> per 10 caratteri, 69¹⁰ celle — **più delle stelle nell'universo osservabile**. Il
+> conteggio esplode. Le reti neurali sono, in un certo senso, il modo di
+> *comprimere* questa tabella impossibile in una funzione con pochi parametri che la
+> *approssima*. Questa frase è metà del senso del deep learning: tienila da parte,
+> tornerà in Fase 4 quando gli embedding faranno esattamente questa compressione.
+
+---
+
+<a name="sec-1-2"></a>
+## 1.2 Da conteggi a probabilità: normalizzare e lo smoothing
+
+I conteggi grezzi non sono ancora probabilità. Per trasformarli, **dividiamo ogni
+riga per la sua somma**: così ogni riga diventa una distribuzione che somma a 1.
+
+```python
+smoothed = self.N.astype(np.float64) + smoothing         # +1 a tutte le celle
+self.P = smoothed / smoothed.sum(axis=1, keepdims=True)   # dividi ogni riga per la sua somma
+```
+
+La riga `P[i]` risponde finalmente alla domanda-chiave di un LM: *"dato il carattere
+`i`, con che probabilità arriva ciascun carattere?"*. È la prima incarnazione
+concreta della "domanda unica" della [sezione 0.0](#sec-0-0).
+
+### Perché il `+1` (smoothing di Laplace)
+
+Guarda quel `+ smoothing` (di default 1). Serve a risolvere un problema serio: se una
+coppia non compare **mai** nel training, il suo conteggio è 0, e la sua probabilità
+sarebbe 0. Ma "mai visto nel campione" ≠ "impossibile". Se poi quella coppia
+comparisse nel testo di validation, il modello le assegnerebbe probabilità 0 →
+`log(0) = −∞` → **loss infinita**, tutto rotto da un singolo evento raro.
+
+Il `+1` dice: *"fingiamo di aver visto ogni coppia almeno una volta"*. Nessuna
+probabilità è più esattamente zero, e la catastrofe è evitata.
+
+> **📖 Concetto: la regolarizzazione, prima apparizione.** Lo smoothing è un esempio
+> di un principio eterno del machine learning: **non fidarti ciecamente dei dati
+> osservati; le stime vanno "ammorbidite"**. Un campione finito non contiene tutto
+> ciò che è possibile; assumere che ciò che non hai visto sia impossibile è
+> l'errore. Vedremo la stessa idea, in altre vesti, nel *weight decay* di Fase 4.
+> (Curiosità: le reti neurali "ammorbidiscono" da sole, per come è fatta la funzione
+> softmax — non producono mai esattamente 0 — e lo noteremo in Fase 2.)
+
+---
+
+<a name="sec-1-3"></a>
+## 1.3 Broadcasting: la regola che allinea le shape
+
+In quella riga di normalizzazione c'è un dettaglio NumPy che va capito ora perché
+tornerà, cruciale, quando in Fase 3 dovremo calcolare i gradienti *attraverso* di
+esso.
+
+```python
+smoothed.sum(axis=1, keepdims=True)   # shape (69, 1), non (69,)
+```
+
+`smoothed` ha shape `(69, 69)`. Sommando lungo `axis=1` (le colonne) otteniamo una
+somma per ogni riga: 69 numeri. Con `keepdims=True` questi 69 numeri hanno shape
+`(69, 1)` — una colonna — invece di `(69,)` — una fila.
+
+Poi facciamo `smoothed / somma`, dividendo una matrice `(69, 69)` per una colonna
+`(69, 1)`. Come fa NumPy? Con il **broadcasting**.
+
+> **📖 Concetto: il broadcasting.** Quando operi tra due tensori di shape diverse,
+> NumPy prova ad "allargarli" a una forma comune replicando *virtualmente* le
+> dimensioni di taglia 1. Una colonna `(69, 1)` divisa in una matrice `(69, 69)`:
+> NumPy immagina di replicare quella colonna 69 volte in orizzontale, così ogni
+> elemento della riga `i` viene diviso per la somma della riga `i`. È esattamente
+> ciò che vogliamo: normalizzare riga per riga. **Se avessimo usato `keepdims=False`
+> ottenendo shape `(69,)`, il broadcasting avrebbe allineato quei 69 numeri alle
+> *colonne* invece che alle *righe*, e avremmo normalizzato nel verso sbagliato** —
+> un bug silenzioso classico. Per questo `keepdims=True` è importante.
+
+Il broadcasting è comodissimo in avanti (nel forward), ma in Fase 3 dovremo
+insegnare al nostro motore di gradienti a "disfarlo" all'indietro (sommare i
+gradienti lungo le dimensioni che erano state replicate). È, ti anticipo, il punto
+tecnicamente più insidioso di tutto il progetto. Averlo incontrato qui, in un
+contesto semplice, ci prepara.
+
+---
+
+<a name="sec-1-4"></a>
+## 1.4 Generare testo: il campionamento autoregressivo
+
+Avere `P` ci permette di *generare*. L'algoritmo (metodo `generate`):
+
+1. Parti da un carattere (noi partiamo da un a-capo `\n`, che spesso inizia una riga).
+2. Leggi la sua riga di probabilità `P[carattere_corrente]`.
+3. **Estrai** il prossimo carattere a caso, rispettando quelle probabilità.
+4. Aggiungilo, e ripeti dal punto 2 col nuovo carattere.
+
+```python
+cur = int(rng.choice(self.vocab_size, p=self.P[cur]))
+```
+
+> **📖 Concetto: perché si campiona e non si prende il massimo.** Verrebbe la
+> tentazione di scegliere sempre il carattere *più* probabile (la scelta "greedy",
+> avida). Ma da uno stesso carattere uscirebbe *sempre* la stessa catena, e il testo
+> collasserebbe in un ciclo degenere (es. `"e le le le le…"`). Estrarre a caso
+> *secondo* la distribuzione mantiene la varietà naturale del linguaggio: l'output è
+> diverso a ogni esecuzione ma statisticamente fedele al corpus. Questa tensione tra
+> "probabile" (conservativo) e "vario" (creativo) tornerà, con manopole esplicite
+> (temperature, top-k), in Fase 7. Qui ne vediamo la forma pura.
+
+`rng.choice(V, p=P[cur])` fa esattamente questo: estrae un indice tra 0 e V−1 con
+probabilità date dal vettore `P[cur]`. E, essendo `rng` un generatore con seed
+esplicito ([sezione 0.9](#sec-0-9)), la generazione è riproducibile.
+
+---
+
+<a name="sec-1-5"></a>
+## 1.5 La loss spiegata a fondo: negative log-likelihood
+
+Ecco il concetto più importante della Fase 1, e forse dell'intero progetto: come si
+misura *con un numero* quanto è buono un modello probabilistico. Ci arriviamo per
+gradi, perché ogni pezzo della formula ha una ragione.
+
+**Punto di partenza.** Un buon modello assegna probabilità **alta al testo che è
+realmente accaduto**. Quindi, come misura di bravura, prendiamo la probabilità che
+il modello assegna all'intero testo di validation. La probabilità di una sequenza è
+il **prodotto** delle probabilità dei singoli passi (regola della catena della
+probabilità):
+
+```
+P(testo) = P(c₂|c₁) · P(c₃|c₂) · P(c₄|c₃) · … · P(c_n|c_{n-1})
+```
+
+Vorremmo *massimizzare* questo prodotto. Ma ha tre problemi pratici, e li risolviamo
+con tre ritocchi.
+
+**Ritocco 1 — il logaritmo.** Quel prodotto è composto da decine di migliaia di
+numeri, tutti minori di 1. Il risultato è un numero *microscopico*, così piccolo che
+il computer non riesce a rappresentarlo (diventa 0 per arrotondamento:
+"underflow"). Applicando il **logaritmo**, il prodotto diventa una **somma**:
+
+```
+log P(testo) = log P(c₂|c₁) + log P(c₃|c₂) + …
+```
+
+Le somme di numeri gestibili non danno underflow. E siccome il logaritmo è una
+funzione *crescente*, massimizzare `log P` equivale a massimizzare `P`: non abbiamo
+cambiato il problema, solo reso i conti stabili.
+
+> **📖 Concetto: perché il logaritmo trasforma prodotti in somme.** È la sua
+> proprietà fondante: `log(a·b) = log(a) + log(b)`. Applicata a mille fattori,
+> trasforma un prodotto ingestibile in una somma comoda. È il motivo per cui i
+> logaritmi compaiono ovunque quando si maneggiano probabilità.
+
+**Ritocco 2 — il segno meno.** Per convenzione, negli algoritmi si *minimizzano* le
+funzioni di costo, non si massimizzano. Basta cambiare segno: minimizzare `−log P`
+equivale a massimizzare `log P`. E `−log(p)` ha un'interpretazione bellissima:
+
+- se il modello era **certo** del carattere giusto (`p ≈ 1`), allora `−log(1) = 0`:
+  nessuna penalità;
+- se gli aveva dato probabilità **bassa** (`p ≈ 0.01`), allora `−log(0.01) ≈ 4.6`:
+  penalità grande;
+- se gli aveva dato `p ≈ 0`, la penalità tende a **infinito**.
+
+In altre parole, `−log(p)` **punisce la sicurezza malriposta**: sbagliare essendo
+sicuri costa carissimo. È esattamente il comportamento che vogliamo da un modello
+onesto.
+
+**Ritocco 3 — la media.** Invece della somma totale, prendiamo la **media** per
+carattere. Così il numero non dipende dalla lunghezza del testo (un libro lungo non
+ha "più loss" di uno corto solo perché è lungo): diventa confrontabile tra dataset
+diversi e — cosa cruciale per noi — **tra le fasi del progetto**.
+
+Il risultato di questi tre ritocchi ha un nome: **cross-entropy**, o **negative
+log-likelihood (NLL)**. Nel codice:
+
+```python
+probs = self.P[a, b]                # probabilità assegnata a ogni coppia realizzata
+return float(-np.log(probs).mean())  # media di -log: la cross-entropy
+```
+
+> **📖 Concetto: cosa "sente" la loss — sorpresa e perplexity.** La NLL media si può
+> leggere come la **"sorpresa media per carattere"**, misurata in *nats* (l'unità
+> quando si usa il logaritmo naturale). Bassa sorpresa = il modello quasi sempre
+> "se lo aspettava". Un'altra lettura, ancora più intuitiva, è la **perplexity** =
+> `e^NLL`: approssima *"tra quanti caratteri, in media, il modello sta davvero
+> esitando"*. Perplexity 10 significa: è come se, a ogni passo, il modello fosse
+> indeciso tra ~10 caratteri equiprobabili. Per un vocabolario di 69, esitare tra 10
+> invece che tra 69 è un bel progresso.
+
+**Questa è la stessa identica loss con cui è addestrato GPT-4.** Da qui in avanti,
+ogni modello del progetto sarà giudicato da questo numero. La cosa straordinaria è
+che l'abbiamo capito su un modello che *conta*: nella prossima fase useremo la
+*stessa* loss come bussola per un modello che *impara*.
+
+---
+
+<a name="sec-1-6"></a>
+## 1.6 I nostri numeri, letti uno per uno
+
+Ecco cosa produce il nostro bigram sul corpus Pinocchio:
+
+```
+NLL uniforme (log 69)   = 4.2341 nats     <- il modello che tira a caso
+NLL bigram TRAIN        = 2.3340 nats
+NLL bigram VAL          = 2.3455 nats
+perplexity VAL (e^NLL)  = 10.44
+```
+
+Leggiamoli come un ricercatore leggerebbe una tabella di risultati:
+
+- **4.2341 è il riferimento da battere.** È `log(69)`: la sorpresa di un modello che
+  non sa nulla e assegna 1/69 a ogni carattere. Qualsiasi modello utile deve stare
+  *sotto* questo numero.
+- **2.3455 sul validation** è nettamente sotto 4.2341: il bigram ha imparato
+  qualcosa di reale sull'italiano. Quasi *dimezza* la sorpresa rispetto al caso.
+- **Train (2.3340) ≈ Val (2.3455).** I due numeri sono quasi identici. Questo ci dice
+  una cosa importante: **il bigram non fa overfitting**. È troppo "povero" (una
+  tabella fissa) per memorizzare il training; quel poco che impara generalizza
+  perfettamente. È la prima osservazione sperimentale del rapporto tra capacità del
+  modello e overfitting — un tema che esploderemo in Fase 4, dove per la prima volta
+  vedremo train e val *separarsi*.
+- **Verifica qualitativa:** abbiamo controllato la riga della `q`, e il modello
+  prevede `u` al **93.3%**. Ha imparato, contando, una regola ortografica
+  dell'italiano. Nessuno gliel'ha detta: era nei dati.
+
+E il testo generato? Qualcosa come:
+
+```
+lona s... de filì; — bi E griede
+pe  sccocoll lesil e arevemin facavancomasuto cogespiaccatogin d; vialo! ...
+```
+
+È **pseudo-italiano sillabico**: non ci sono parole vere, ma ci sono le doppie
+(`cc`, `ll`), le vocali finali, gli spazi alla frequenza giusta, perfino i trattini
+dei dialoghi e i punti di sospensione. Per un modello che vede **un solo carattere**
+alla volta, questo è il massimo teorico. E vederlo tara le nostre aspettative: non
+possiamo pretendere parole coerenti da chi non ricorda nemmeno la lettera di due
+posizioni fa.
+
+---
+
+<a name="sec-1-7"></a>
+## 1.7 Il limite del bigram e perché è il punto di partenza giusto
+
+Il bigram ha un limite strutturale, ed è *esattamente* il motivo per cui esistono le
+fasi successive: **dimentica tutto tranne l'ultimo carattere**. Non può sapere che
+dopo `"Pinocchi"` viene quasi certamente `o`, perché guarda solo la `i`. Non ha
+memoria del contesto.
+
+Come si supera? Le prossime fasi sono, letteralmente, la lotta contro questo limite:
+
+- **Fase 2** — impareremo le *stesse* probabilità del bigram, ma con la discesa del
+  gradiente invece che coi conteggi. Non migliora la qualità (stesso modello!), ma
+  ci insegna *il meccanismo dell'apprendimento*, che è ciò che poi scaleremo.
+- **Fase 4** — l'MLP guarderà gli ultimi N caratteri (non uno solo), e comprimerà la
+  "tabella impossibile" ([sezione 1.1](#sec-1-1)) usando gli embedding.
+- **Fasi 5–7** — l'attention permetterà al modello di guardare *tutto* il contesto e
+  decidere da solo quali parti contano.
+
+Il bigram non è un modello "sbagliato": è il gradino zero, quello che rende visibili
+i concetti prima che i meccanismi li nascondano. Ora che sappiamo cos'è una
+distribuzione sul prossimo carattere, cos'è il campionamento e — soprattutto — cos'è
+la loss, siamo pronti a far *imparare* una macchina.
+
+---
+
+<a name="sec-1-8"></a>
+## 1.8 Glossario Fase 1 / cosa arriva in Fase 2
+
+Nuovi termini:
+
+- **Bigram**: coppia di caratteri consecutivi; il modello che predice il prossimo
+  carattere dal solo precedente.
+- **Smoothing (di Laplace)**: aggiungere un conteggio fittizio (`+1`) per evitare
+  probabilità nulle.
+- **Broadcasting**: la regola con cui NumPy allinea tensori di shape diverse
+  replicando virtualmente le dimensioni di taglia 1.
+- **Campionamento autoregressivo**: generare testo estraendo un carattere alla volta
+  dalla distribuzione, rialimentando l'output.
+- **Loss / Negative Log-Likelihood (NLL) / cross-entropy**: la media di `−log(p)`,
+  la misura di "sorpresa" del modello. Più bassa = meglio.
+- **Nats**: l'unità della NLL quando si usa il logaritmo naturale.
+- **Perplexity**: `e^NLL`; "tra quanti caratteri il modello sta esitando".
+- **Overfitting** (osservato *non* accadere qui): memorizzare invece di generalizzare.
+
+**In Fase 2** faremo una cosa che sembra un giro a vuoto ma è illuminante: otterremo
+lo *stesso* modello del bigram — le stesse probabilità — ma invece di *contarle* le
+faremo **imparare** a una piccola rete, per discesa del gradiente. Deriveremo il
+gradiente **a mano** (mezz'ora di algebra che ripaga per sempre) e scopriremo che il
+cuore dell'apprendimento di *ogni* LLM è una sottrazione sorprendentemente semplice:
+`probabilità_predette − verità`. È il vero "hello world" della backpropagation.
+
+---
+
+*Fine del capitolo Fase 1. Il prossimo capitolo (Fase 2) verrà aggiunto qui sotto.*

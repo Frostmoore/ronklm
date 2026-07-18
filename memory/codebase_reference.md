@@ -5,8 +5,8 @@
 > aprire i file**. Se per sapere la firma di un metodo bisogna leggere il sorgente,
 > questo documento ha fallito.
 >
-> **Stato**: aggiornato a fine **Fase 0** (2026-07-18). Copre corpus, tokenizer,
-> dataset, test. Il piano completo è in [`plan_ronklm_system.md`](plan_ronklm_system.md).
+> **Stato**: aggiornato a fine **Fase 1** (2026-07-18). Copre corpus, tokenizer,
+> dataset, bigram a conteggio, test. Il piano è in [`plan_ronklm_system.md`](plan_ronklm_system.md).
 >
 > **Verifica meccanica firme**: eseguita a fine Fase 0 con estrazione `def`/`class`
 > via grep e confronto con le tabelle qui sotto. ✅ Allineato.
@@ -22,6 +22,7 @@
 | Convertire testo ⇄ interi | `CharTokenizer` in [`ronklm/tokenizer.py`](../ronklm/tokenizer.py) |
 | Split train/val e batch (X, Y) | `Dataset` in [`ronklm/dataset.py`](../ronklm/dataset.py) |
 | Leggere un file di corpus | `load_text()` in [`ronklm/dataset.py`](../ronklm/dataset.py) |
+| Bigram per conteggio (Fase 1) | `BigramCount` in [`ronklm/models/bigram_count.py`](../ronklm/models/bigram_count.py) |
 | Eseguire tutti i test | `python run_tests.py` (radice) |
 | Runner di test senza pytest | [`tests/_runner.py`](../tests/_runner.py) |
 | Versione del pacchetto | `__version__` in [`ronklm/__init__.py`](../ronklm/__init__.py) |
@@ -40,11 +41,15 @@ RonkLM/
 ├── ronklm/
 │   ├── __init__.py            # docstring pacchetto + __version__
 │   ├── tokenizer.py           # CharTokenizer
-│   └── dataset.py             # load_text(), Dataset
+│   ├── dataset.py             # load_text(), Dataset
+│   └── models/
+│       ├── __init__.py
+│       └── bigram_count.py    # BigramCount (Fase 1)
 ├── tests/
 │   ├── _runner.py             # run(namespace) -> n_fallimenti
 │   ├── test_tokenizer.py      # 8 test
-│   └── test_dataset.py        # 8 test
+│   ├── test_dataset.py        # 8 test
+│   └── test_bigram_count.py   # 6 test
 ├── run_tests.py               # lancia tutti i tests/test_*.py
 ├── explain.md                 # libro di testo: spiegazione didattica per fase
 ├── requirements.txt           # numpy (+ matplotlib opz., torch dalla Fase 9)
@@ -53,10 +58,10 @@ RonkLM/
 └── .gitignore
 ```
 
-**NON esiste ancora** (per evitare ricerche a vuoto): nessun modello
-(`ronklm/models/`), nessun autograd (`ronklm/autograd.py`), nessun layer
-(`ronklm/nn.py`), nessun ottimizzatore (`ronklm/optim.py`), nessun training loop,
-nessuna generazione. Arrivano dalle Fasi 1+.
+**NON esiste ancora** (per evitare ricerche a vuoto): nessun autograd
+(`ronklm/autograd.py`), nessun layer (`ronklm/nn.py`), nessun ottimizzatore
+(`ronklm/optim.py`), nessun modello neurale (bigram neurale, MLP, GPT). Arrivano
+dalle Fasi 2+. Esiste solo il modello a conteggio (Fase 1).
 
 ---
 
@@ -124,7 +129,35 @@ Metodi:
 - indici di partenza in `[0, len(data)-block_size)` (mai fuori bordo).
 - deterministico rispetto a `rng`: stesso seed → stesso batch.
 
-### 3.3 `data/prepare_corpus.py` — script di preparazione corpus
+### 3.3 `ronklm/models/bigram_count.py` — classe `BigramCount`
+
+Language model a bigrammi basato su conteggi (Fase 1). Predice il prossimo carattere
+dal solo precedente; impara contando, senza gradienti.
+
+Attributi d'istanza:
+
+| Attributo | Tipo | Significato |
+|---|---|---|
+| `vocab_size` | `int` | numero di token distinti |
+| `N` | `np.ndarray[int64]` shape `(V, V)` | conteggi: `N[i, j]` = quante volte a `i` segue `j` |
+| `P` | `np.ndarray[float64]` shape `(V, V)` \| `None` | probabilità per riga (dopo `fit`) |
+| `smoothing` | `float` | conteggio fittizio aggiunto (Laplace) |
+
+Metodi:
+
+| Metodo | Firma | Effetto |
+|---|---|---|
+| `__init__` | `(self, vocab_size: int) -> None` | alloca `N` a zeri, `P=None` |
+| `fit` | `(self, data: np.ndarray, smoothing: float = 1.0) -> BigramCount` | conta i bigrammi (`np.add.at`) e calcola `P` normalizzando per riga con smoothing |
+| `nll` | `(self, data: np.ndarray) -> float` | NLL media in nats sulle coppie di `data`; `RuntimeError` se non fittato |
+| `uniform_nll` | `(vocab_size: int) -> float` *(staticmethod)* | `log(vocab_size)`: la NLL del modello uniforme |
+| `generate` | `(self, rng: np.random.Generator, n: int, start: int = 0) -> list[int]` | campiona `n` indici autoregressivamente da `start` |
+| `__repr__` | `(self) -> str` | `BigramCount(vocab_size=…, fitted/non-fitted)` |
+
+**Numeri di riferimento** (corpus Pinocchio, smoothing=1): NLL uniforme **4.2341**,
+train **2.3340**, val **2.3455** nats; perplexity val **10.44**.
+
+### 3.4 `data/prepare_corpus.py` — script di preparazione corpus
 
 Funzioni (tutte a livello di modulo; script eseguibile con `python data/prepare_corpus.py [--force]`):
 
@@ -183,7 +216,19 @@ argomenti di funzione con default:
 
 ## 6. Catalogo dei test
 
-Runner: `python run_tests.py` (nessun pytest richiesto). **16 test, tutti verdi.**
+Runner: `python run_tests.py` (nessun pytest richiesto). **22 test, tutti verdi.**
+
+`tests/test_bigram_count.py` (6):
+
+| Test | Cosa dimostra |
+|---|---|
+| `test_counts_on_toy_corpus` | i conteggi `N` sono corretti su "abab" noto |
+| `test_rows_are_probability_distributions` | ogni riga di `P` somma a 1 |
+| `test_smoothing_removes_zeros` | con smoothing nessuna probabilità è 0 |
+| `test_beats_uniform_on_train_and_val` | NLL bigram < NLL uniforme (impara qualcosa) |
+| `test_val_nll_is_finite` | NLL su val finita (lo smoothing evita `-inf`) |
+| `test_generation_is_valid_and_reproducible` | indici validi; stesso seed → stessa generazione |
+
 
 `tests/test_tokenizer.py` (8):
 
