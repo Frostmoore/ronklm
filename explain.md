@@ -44,6 +44,17 @@
   - [1.6 I nostri numeri, letti uno per uno](#sec-1-6)
   - [1.7 Il limite del bigram e perché è il punto di partenza giusto](#sec-1-7)
   - [1.8 Glossario Fase 1 / cosa arriva in Fase 2](#sec-1-8)
+- [Fase 2 — Imparare invece di contare: la backpropagation](#fase-2)
+  - [2.0 L'idea: la stessa meta, per la strada opposta](#sec-2-0)
+  - [2.1 One-hot e la matrice dei pesi W](#sec-2-1)
+  - [2.2 La softmax, spiegata a fondo](#sec-2-2)
+  - [2.3 La derivazione del gradiente, a mano, passo per passo](#sec-2-3)
+  - [2.4 Il training loop: i 5 passi del deep learning](#sec-2-4)
+  - [2.5 Il learning rate: l'arte del passo giusto](#sec-2-5)
+  - [2.6 La prova del nove: neurale ≡ conteggi](#sec-2-6)
+  - [2.7 Il gradient check: come si verifica un gradiente](#sec-2-7)
+  - [2.8 Un bonus elegante: allenare dai conteggi](#sec-2-8)
+  - [2.9 Glossario Fase 2 / cosa arriva in Fase 3](#sec-2-9)
 
 ---
 
@@ -1098,4 +1109,395 @@ cuore dell'apprendimento di *ogni* LLM è una sottrazione sorprendentemente semp
 
 ---
 
-*Fine del capitolo Fase 1. Il prossimo capitolo (Fase 2) verrà aggiunto qui sotto.*
+*Fine del capitolo Fase 1.*
+
+---
+
+<a name="fase-2"></a>
+# Fase 2 — Imparare invece di contare: la backpropagation
+
+Questa è, per la comprensione, **la fase più importante di tutto il progetto**. Tutto
+ciò che verrà dopo — l'MLP, l'attention, il GPT — è la ripetizione, su funzioni più
+ricche, del meccanismo che costruiamo qui. Se capisci fino in fondo questo capitolo,
+hai capito come si addestra *qualsiasi* rete neurale, GPT-4 incluso.
+
+📁 File: [`ronklm/models/bigram_neural.py`](ronklm/models/bigram_neural.py)
+
+---
+
+<a name="sec-2-0"></a>
+## 2.0 L'idea: la stessa meta, per la strada opposta
+
+In Fase 1 abbiamo ottenuto le probabilità del bigram **contando**. In Fase 2
+otterremo *le stesse probabilità* in un modo completamente diverso: le faremo
+**imparare** a una piccola rete, per tentativi corretti dal gradiente.
+
+Sembra un giro a vuoto — perché imparare a fatica ciò che si può contare in un
+istante? Perché **il conteggio non scala** (lo abbiamo visto: la tabella esplode con
+il contesto), mentre l'apprendimento per gradiente **sì**. Il bigram è il banco di
+prova perfetto: siccome sappiamo *già* dove si deve arrivare (la `P` contata), ogni
+pezzo del meccanismo di apprendimento è verificabile contro una verità nota. È come
+imparare a usare una bussola in un posto di cui hai già la mappa: se la bussola ti
+porta dove dice la mappa, ti puoi fidare quando andrai in territori inesplorati (le
+fasi successive).
+
+---
+
+<a name="sec-2-1"></a>
+## 2.1 One-hot e la matrice dei pesi W
+
+Il modello è **una sola matrice** `W` di dimensione `(V × V)` = 69×69. Come si usa?
+
+Un carattere in ingresso, poniamo l'indice `i`, viene prima rappresentato come
+vettore **one-hot**: un vettore lungo 69, tutto zeri tranne un `1` nella posizione
+`i`. Poi i *logits* (i punteggi grezzi per il prossimo carattere) si ottengono così:
+
+```
+logits = onehot(i) @ W
+```
+
+> **📖 Concetto: perché one-hot e non il numero grezzo.** Potremmo dare alla rete
+> direttamente l'indice (12 per `m`, 13 per `n`). Ma così suggeriremmo che `n` = `m`
+> + 1 in qualche senso numerico — una relazione **falsa e dannosa**: le lettere non
+> hanno un ordine aritmetico. Il one-hot rende tutti i caratteri *equidistanti*:
+> ognuno è una direzione diversa e indipendente. È il modo onesto di dare un simbolo
+> discreto a una macchina che fa solo aritmetica.
+
+> **🔧 Nel codice: one-hot @ matrice = selezione di riga.** C'è un'osservazione che
+> pagherà tantissimo in Fase 4. Moltiplicare un vettore one-hot (con l'1 in
+> posizione `i`) per una matrice `W` **non fa alcun vero calcolo**: restituisce
+> semplicemente la **riga `i`-esima** di `W`. Prova a immaginarlo: l'1 "pesca" la
+> riga `i`, gli zeri annullano tutte le altre. Quindi nel codice non scriviamo
+> davvero la moltiplicazione, scriviamo `self.W[x_idx]` — selezioniamo le righe. È
+> più veloce e identico. Quando in Fase 4 arriveranno gli **embedding**, non saranno
+> un'idea nuova: saranno *questa stessa selezione di riga*, con righe più corte.
+
+**Inizializzazione.** `W` parte con numeri gaussiani **piccoli** (deviazione standard
+0.01). Perché piccoli e non zero, e perché ci teniamo?
+
+- Con `W` tutti uguali (es. zero), tutti i logit sono uguali → il modello parte dalla
+  distribuzione uniforme. Qui andrebbe bene, ma nelle reti a più strati pesi tutti
+  identici creano neuroni che ricevono gradienti identici e non si differenziano mai
+  (un problema chiamato "rottura della simmetria" mancata). Prendiamo subito
+  l'abitudine giusta: init casuale.
+- **Piccoli**, perché logit grandi a caso = modello che parte *sicurissimo e a
+  sproposito* = loss iniziale enorme e primi passi violenti.
+
+> **📖 Concetto: il sanity check della loss iniziale.** Ecco un controllo che
+> useremo *sempre*, in ogni fase, e che cattura una quantità sorprendente di bug in
+> 5 secondi. All'inizio del training, un modello ben inizializzato non sa nulla,
+> quindi deve assegnare ~la stessa probabilità a ogni carattere: la sua loss deve
+> valere circa **log(V) = log(69) ≈ 4.23**. Se all'avvio la loss è molto diversa (o
+> è `NaN`), qualcosa nell'inizializzazione o nel forward è rotto. Il nostro modello,
+> misurato, parte a **4.2339** — perfetto.
+
+---
+
+<a name="sec-2-2"></a>
+## 2.2 La softmax, spiegata a fondo
+
+I logit sono numeri reali qualsiasi (anche negativi, anche 100, anche −7). Ma a noi
+servono *probabilità* (positive, che sommano a 1) per poter usare la loss della Fase
+1. Il ponte tra i due mondi è la funzione **softmax**:
+
+```
+softmax(z)_j = exp(z_j) / Σ_k exp(z_k)
+```
+
+In parole: prendi l'esponenziale di ogni logit (così diventano tutti positivi),
+poi dividi ciascuno per la somma di tutti (così sommano a 1).
+
+> **📖 Concetto: perché proprio la softmax.** Ha esattamente le proprietà che
+> servono: (a) `exp` rende tutto positivo; (b) la divisione normalizza a 1; (c) è
+> **derivabile ovunque** — cruciale, perché il gradiente dovrà attraversarla; (d)
+> preserva l'ordine (il logit più grande resta la probabilità più grande); (e) il
+> rapporto tra due probabilità dipende *esponenzialmente* dalla differenza dei loro
+> logit — cioè pochi punti di logit di vantaggio si traducono in un dominio quasi
+> totale. Il nome viene da qui: è una versione "morbida" (soft) e derivabile della
+> funzione `argmax` (che sceglierebbe seccamente il massimo).
+
+> **⚠️ Trappola numerica: il `- max`.** `exp(z)` esplode: `exp(800)` supera il più
+> grande numero rappresentabile e diventa `inf`, che poi contamina tutto in `NaN`.
+> La cura: prima di fare gli esponenziali, sottraiamo a tutti i logit il loro massimo
+> (`z - z.max()`). Questo **non cambia il risultato** (la softmax è invariante per
+> traslazione: aggiungere una costante a tutti i logit lascia le probabilità
+> identiche — contano solo le *differenze* tra logit), ma porta il logit più grande a
+> 0 e rende ogni `exp` calcolabile. Nel codice è la riga `z = logits - logits.max(...)`.
+> Prima lezione di una verità permanente: **la matematica su carta e la matematica in
+> virgola mobile sono due discipline diverse**, e i `NaN` nascono quasi sempre in
+> punti come questo.
+
+---
+
+<a name="sec-2-3"></a>
+## 2.3 La derivazione del gradiente, a mano, passo per passo
+
+Eccoci al cuore. Vogliamo sapere: *di quanto, e in che direzione, cambiare ogni peso
+di `W` per ridurre la loss?* Questa informazione è il **gradiente**. Lo deriviamo
+una volta nella vita, a mano, perché il risultato è così semplice e illuminante da
+togliere per sempre la magia dal training.
+
+> **📖 Concetto: cos'è un gradiente.** Per ogni peso, il gradiente è un numero che
+> dice due cose insieme: il *segno* (aumentando quel peso, la loss sale o scende?) e
+> la *grandezza* (quanto è sensibile la loss a quel peso?). Muovendo ogni peso nella
+> direzione **opposta** al suo gradiente, la loss scende. Questo è tutto ciò che fa
+> l'addestramento.
+
+Prepariamo i pezzi. Per un singolo esempio: input carattere `i`, risposta giusta
+carattere `y`.
+- logit: `z = W[i]` (un vettore di 69 numeri)
+- probabilità: `p = softmax(z)` (69 numeri che sommano a 1)
+- loss: `L = −log(p[y])` (quanto ci siamo sorpresi del carattere giusto)
+
+**Passo 1 — la derivata della loss rispetto ai logit.** Questo è il calcolo centrale.
+Vogliamo `∂L/∂z_j` per ogni `j`. Serve la regola della catena attraverso la softmax e
+il logaritmo. Salto i dettagli algebrici (sono un'oretta di conti standard: la
+derivata di `−log(softmax)`), ma il risultato è di una bellezza sorprendente:
+
+```
+∂L/∂z_j = p_j − 1{j = y}
+```
+
+dove `1{j = y}` vale 1 se `j` è il carattere giusto, 0 altrimenti. In forma
+vettoriale:
+
+```
+∂L/∂z = p − onehot(y)          cioè:   probabilità_predette − verità
+```
+
+Fermiamoci a **capire cosa dice questa formula**, perché è tutta la magia:
+
+- Se il modello aveva dato al carattere giusto probabilità **alta** (diciamo
+  `p[y] = 0.9`), allora nella posizione giusta il gradiente è `0.9 − 1 = −0.1`:
+  **piccolo**, poco da correggere.
+- Se gli aveva dato probabilità **bassa** (`p[y] = 0.01`), il gradiente lì è
+  `0.01 − 1 = −0.99`: **grande**, forte correzione.
+- Nelle posizioni *sbagliate* (i caratteri che non dovevano venire), il gradiente è
+  `p_j − 0 = p_j`: positivo, "abbassa questa probabilità", tanto più quanto più
+  erroneamente alta era.
+
+**La correzione è automaticamente proporzionale all'errore.** Il modello si corregge
+tanto quanto ha sbagliato, senza che nessuno glielo dica esplicitamente. Questa
+sottrazione, `probs − verità`, è ciò che sta dentro `loss.backward()` per l'ultimo
+strato di *ogni* modello di linguaggio esistente. Non è un'esagerazione: è
+letteralmente questa riga.
+
+**Passo 2 — dalla derivata sui logit a quella su W.** I logit erano `z = W[i]`, cioè
+la riga `i` di `W`. Quindi la derivata rispetto a `W` tocca **solo la riga `i`**:
+
+```
+∂L/∂W[i] = ∂L/∂z = p − onehot(y)          e   ∂L/∂W[altre righe] = 0
+```
+
+> **📖 Perché ha perfettamente senso.** Vedere l'esempio "`q` → `u`" non insegna
+> nulla su cosa viene dopo la `z`. È giusto che l'esempio aggiorni *solo* la riga
+> della `q` (il carattere che abbiamo effettivamente visto) e lasci intatte le altre
+> 68 righe. Il one-hot in ingresso "instrada" il gradiente esattamente sulla riga
+> giusta.
+
+**Passo 3 — su un intero batch.** Con B esempi, sommiamo i contributi e dividiamo per
+B (perché la loss è la *media*). Nel codice:
+
+```python
+dlogits = probs.copy()
+dlogits[np.arange(B), y_idx] -= 1.0     # probs - onehot(y)
+dlogits /= B                            # media sul batch
+dW = np.zeros_like(self.W)
+np.add.at(dW, x_idx, dlogits)           # accumula ogni riga nel posto giusto
+```
+
+Guarda com'è fedele alla derivazione: `dlogits` è `probs`, meno 1 nelle posizioni
+giuste (`probs − onehot(y)`), diviso B; poi `np.add.at` accumula ogni `dlogits`
+nella riga del carattere corrispondente. **Tre righe di codice, un'oretta di algebra
+capita per sempre.**
+
+---
+
+<a name="sec-2-4"></a>
+## 2.4 Il training loop: i 5 passi del deep learning
+
+Ora che sappiamo calcolare il gradiente, il resto è un ciclo. *Questo* ciclo:
+
+```
+per ogni step:
+    1. X, Y = prendi dei dati          # i caratteri e le loro risposte giuste
+    2. probs = forward(X)              # il modello prevede
+    3. loss  = cross_entropy(probs, Y) # quanto ha sbagliato?
+    4. dW    = backward(...)           # in che direzione correggere ogni peso?
+    5. W    -= lr * dW                 # fai un piccolo passo in quella direzione
+```
+
+> **Questo ciclo È il deep learning.** Dalla più semplice regressione a GPT-4,
+> l'intero campo è questo ciclo di cinque righe; cambia soltanto *cosa c'è dentro il
+> forward al passo 2*. Le fasi 4, 5, 6, 7 non toccheranno mai più questi cinque
+> passi: arricchiranno solo il modello dentro il passo 2. Tienilo a mente: quando il
+> GPT sembrerà complicato, il *modo* in cui impara sarà ancora esattamente questo.
+
+**Perché su un batch e non su tutto insieme (o un esempio alla volta)?** Calcolare il
+gradiente su *tutto* il corpus a ogni passo è il più accurato, ma costa una passata
+intera per un solo aggiornamento. Calcolarlo su un piccolo **batch** casuale è una
+*stima rumorosa* del gradiente vero — e va benissimo: mille passi rumorosi ed
+economici battono un passo perfetto e costosissimo. Questo si chiama **discesa del
+gradiente stocastica** (SGD): la "S" sta per il batch casuale. (Curiosamente, il
+rumore ha perfino effetti *benefici* sulla generalizzazione, ma è un'altra storia.)
+
+---
+
+<a name="sec-2-5"></a>
+## 2.5 Il learning rate: l'arte del passo giusto
+
+Al passo 5 c'è un numero, `lr` (learning rate, tasso di apprendimento), che moltiplica
+il gradiente. È **l'iperparametro più importante del machine learning**, e vale la
+pena capirlo con un'immagine.
+
+> **📖 Concetto: scendere in una valle nella nebbia.** Immagina la loss come un
+> paesaggio di montagne e valli, e i pesi come la tua posizione. Vuoi arrivare al
+> fondo di una valle (loss minima). Il gradiente ti dice la *pendenza sotto i piedi*
+> — la direzione di massima salita — quindi vai nella direzione opposta. Ma di quanto
+> ti sposti a ogni passo? Questo lo decide il `lr`:
+>
+> - **`lr` troppo grande:** fai passi enormi, scavalchi la valle e ti ritrovi più in
+>   alto dall'altra parte. La loss *oscilla* o addirittura *diverge* (esplode).
+> - **`lr` troppo piccolo:** fai passetti minuscoli, impieghi ere geologiche a
+>   scendere. Il training è cortissimo di vista.
+> - **`lr` giusto:** scendi spedito ma controllato.
+
+Il gradiente è un'informazione *locale* (la pendenza *qui*): dice la direzione giusta
+solo per un passettino. Ecco perché il `lr` esiste ed è delicato: sbagliarlo di un
+fattore 10 può distruggere qualsiasi addestramento. Nelle fasi successive vedremo due
+raffinamenti: l'ottimizzatore **AdamW** (Fase 4), che adatta di fatto un `lr` diverso
+per ogni peso, e lo **scheduling** (Fase 8), che lo fa variare durante il training.
+
+---
+
+<a name="sec-2-6"></a>
+## 2.6 La prova del nove: neurale ≡ conteggi
+
+Come facciamo a sapere che tutto questo meccanismo — forward, softmax, gradiente,
+update — funziona davvero? Con una verifica netta, resa possibile dal fatto che
+conosciamo già la risposta.
+
+> **📖 Concetto: c'è una sola soluzione ottima, ed è quella contata.** Un risultato
+> matematico standard (la *massima verosimiglianza*) dice che la matrice `W` che
+> minimizza la cross-entropy corrisponde *esattamente* alla distribuzione empirica dei
+> conteggi. In altre parole: il minimo assoluto del paesaggio di loss è proprio la
+> `P` che in Fase 1 avevamo ottenuto contando. Quindi il training, partito da pesi
+> **casuali**, deve *riscoprire da solo*, per pura discesa del gradiente, la tabella
+> della Fase 1.
+
+E infatti accade. Ecco i numeri misurati:
+
+```
+loss iniziale (pesi casuali)  = 4.2339    (~log 69: parte ~uniforme ✓)
+loss dopo 500 step            = 2.3727
+NLL neurale   train / val     = 2.3726 / 2.3853
+NLL conteggio train / val     = 2.3340 / 2.3455
+scarto medio |P_neurale − P_conteggi| = 0.012
+```
+
+Il modello neurale, partito dal caos, è sceso fino a **sfiorare** la NLL del bigram a
+conteggio, e le due matrici di probabilità differiscono in media di appena 0.012. (Il
+piccolo scarto residuo è perché a 500 passi non è *ancora* perfettamente al minimo, e
+perché il conteggio usa lo smoothing e il neurale no: differenze di secondo ordine.)
+La bussola ci ha portato dove diceva la mappa. **Il meccanismo di apprendimento
+funziona** — e ora possiamo fidarcene quando andremo dove la mappa non c'è.
+
+---
+
+<a name="sec-2-7"></a>
+## 2.7 Il gradient check: come si verifica un gradiente
+
+C'è un secondo test, e nel deep learning è **il più importante che si possa
+scrivere**. Serve a rispondere alla domanda: "sono sicuro che il gradiente che ho
+derivato a mano è giusto?".
+
+> **📖 Concetto: perché un gradiente sbagliato è il bug peggiore.** Un backward
+> sbagliato spesso **non rompe niente di visibile**: il training parte, la loss magari
+> perfino scende (male), e passi giorni a incolpare il learning rate o
+> l'architettura mentre la colpa era in una derivata sbagliata. Non dà errori: degrada
+> in silenzio. Per questo va verificato con un metodo *indipendente*.
+
+L'idea del **gradient check** è geniale nella sua semplicità: verifichiamo il
+gradiente (difficile da scrivere giusto) usando *solo* la loss (facile da scrivere
+giusta). Come? Con la definizione stessa di derivata. La derivata della loss rispetto
+a un peso `w` è "di quanto cambia la loss se muovo un pochino `w`". Allora:
+
+1. prendi un peso `w`, aumentalo di un pochino `h` (es. `h = 10⁻⁵`), misura la loss;
+2. diminuiscilo di `h`, misura di nuovo la loss;
+3. la stima numerica del gradiente è `(loss(w+h) − loss(w−h)) / (2h)`.
+
+Se questa stima numerica **coincide** con il gradiente analitico (quello derivato a
+mano), il gradiente è giusto. Nel nostro test, l'errore relativo massimo è risultato
+**sotto 10⁻⁴**: coincidono.
+
+> **📖 Concetto: perché la differenza *centrale* (`w+h` e `w−h`) e non solo `w+h`.**
+> Un'analisi con la formula di Taylor mostra che la differenza "in avanti"
+> `(L(w+h) − L(w))/h` ha un errore proporzionale a `h`, mentre quella "centrale"
+> `(L(w+h) − L(w−h))/(2h)` ha un errore proporzionale a `h²` — enormemente più
+> piccolo a parità di `h`. È il motivo per cui si usa sempre la forma centrale.
+
+> **📖 Concetto: e allora perché non addestrare *così*, numericamente?** Perché il
+> gradient check richiede **due valutazioni della loss per ogni singolo peso**. Per
+> un modello da un milione di parametri sarebbero due milioni di forward per un solo
+> passo di training. La backpropagation ottiene *tutti* i gradienti al costo di circa
+> **due** forward in totale. È questa efficienza, e nient'altro, ad aver reso
+> possibile il deep learning. Il gradient check è uno strumento di *verifica*, non di
+> allenamento. In Fase 3 lo trasformeremo da artigianale a sistematico, su ogni
+> singola operazione del nostro motore.
+
+---
+
+<a name="sec-2-8"></a>
+## 2.8 Un bonus elegante: allenare dai conteggi
+
+Nel codice c'è un metodo `train_from_counts` che merita una nota, perché racchiude una
+piccola perla. Allenare full-batch sulle 216.000 coppie è lento (ogni passo tocca
+tutte le coppie). Ma per un bigram c'è una scorciatoia *esatta*: siccome tutte le
+posizioni con lo stesso carattere di partenza `i` hanno gli stessi logit `W[i]`, il
+gradiente sommato sulla riga `i` si scrive in forma chiusa usando solo i conteggi:
+
+```
+dW[i] = ( (quante volte i appare come "da") · softmax(W[i]) − N[i] ) / totale
+```
+
+Cioè: non serve toccare le coppie una per una, bastano i conteggi `N` della Fase 1.
+Il costo per passo crolla da "proporzionale al numero di coppie" a "proporzionale a
+V²" (69² celle). **È la stessa cosa vista da due lati**: la conferma, ancora una
+volta, che il modello che conta e il modello che impara sono profondamente lo stesso
+oggetto. (Nel progetto usiamo questa via veloce per i test di convergenza; il ciclo
+stocastico "onesto" resta disponibile e testato a parte.)
+
+---
+
+<a name="sec-2-9"></a>
+## 2.9 Glossario Fase 2 / cosa arriva in Fase 3
+
+Nuovi termini:
+
+- **Logit**: il punteggio grezzo (reale qualsiasi) che il modello dà a un token
+  *prima* della softmax.
+- **One-hot**: rappresentazione di un simbolo come vettore di tutti 0 con un solo 1.
+- **Softmax**: funzione che trasforma logit in probabilità (positive, somma 1).
+- **Gradiente**: per ogni peso, direzione e intensità in cui muoverlo per far
+  scendere la loss.
+- **Backpropagation (backward)**: l'algoritmo che calcola i gradienti propagandoli
+  dall'output all'indietro.
+- **Learning rate (`lr`)**: quanto è grande il passo nella direzione del gradiente.
+- **SGD (discesa del gradiente stocastica)**: aggiornare i pesi usando gradienti
+  stimati su batch casuali.
+- **Massima verosimiglianza**: il principio per cui il miglior modello è quello che
+  rende più probabili i dati osservati (→ minimizza la cross-entropy).
+- **Gradient check**: verificare il gradiente analitico confrontandolo con una stima
+  numerica (differenze finite centrali).
+
+**In Fase 3** affronteremo il problema che rende impossibile scalare oltre il bigram:
+derivare i gradienti *a mano* va bene per un layer, ma un GPT ne ha decine, annidati.
+Costruiremo **`ronkgrad`**, un piccolo motore di **differenziazione automatica** (~250
+righe) che, come il cuore di PyTorch, calcola i gradienti *da solo* percorrendo
+all'indietro un "grafo" delle operazioni. Dopo la Fase 3 non deriveremo mai più un
+gradiente a mano: ci basterà scrivere il forward. E capiremo, dall'interno, cosa fa
+davvero quel `loss.backward()` che nei framework sembra magia.
+
+---
+
+*Fine del capitolo Fase 2.*

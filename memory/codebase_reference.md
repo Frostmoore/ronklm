@@ -5,8 +5,8 @@
 > aprire i file**. Se per sapere la firma di un metodo bisogna leggere il sorgente,
 > questo documento ha fallito.
 >
-> **Stato**: aggiornato a fine **Fase 1** (2026-07-18). Copre corpus, tokenizer,
-> dataset, bigram a conteggio, test. Il piano è in [`plan_ronklm_system.md`](plan_ronklm_system.md).
+> **Stato**: aggiornato a fine **Fase 2** (2026-07-18). Copre corpus, tokenizer,
+> dataset, bigram a conteggio e neurale, test. Piano in [`plan_ronklm_system.md`](plan_ronklm_system.md).
 >
 > **Verifica meccanica firme**: eseguita a fine Fase 0 con estrazione `def`/`class`
 > via grep e confronto con le tabelle qui sotto. ✅ Allineato.
@@ -23,6 +23,7 @@
 | Split train/val e batch (X, Y) | `Dataset` in [`ronklm/dataset.py`](../ronklm/dataset.py) |
 | Leggere un file di corpus | `load_text()` in [`ronklm/dataset.py`](../ronklm/dataset.py) |
 | Bigram per conteggio (Fase 1) | `BigramCount` in [`ronklm/models/bigram_count.py`](../ronklm/models/bigram_count.py) |
+| Bigram neurale (Fase 2) | `BigramNeural` in [`ronklm/models/bigram_neural.py`](../ronklm/models/bigram_neural.py) |
 | Eseguire tutti i test | `python run_tests.py` (radice) |
 | Runner di test senza pytest | [`tests/_runner.py`](../tests/_runner.py) |
 | Versione del pacchetto | `__version__` in [`ronklm/__init__.py`](../ronklm/__init__.py) |
@@ -44,12 +45,14 @@ RonkLM/
 │   ├── dataset.py             # load_text(), Dataset
 │   └── models/
 │       ├── __init__.py
-│       └── bigram_count.py    # BigramCount (Fase 1)
+│       ├── bigram_count.py    # BigramCount (Fase 1)
+│       └── bigram_neural.py   # BigramNeural (Fase 2)
 ├── tests/
 │   ├── _runner.py             # run(namespace) -> n_fallimenti
 │   ├── test_tokenizer.py      # 8 test
 │   ├── test_dataset.py        # 8 test
-│   └── test_bigram_count.py   # 6 test
+│   ├── test_bigram_count.py   # 6 test
+│   └── test_bigram_neural.py  # 5 test
 ├── run_tests.py               # lancia tutti i tests/test_*.py
 ├── explain.md                 # libro di testo: spiegazione didattica per fase
 ├── requirements.txt           # numpy (+ matplotlib opz., torch dalla Fase 9)
@@ -157,7 +160,35 @@ Metodi:
 **Numeri di riferimento** (corpus Pinocchio, smoothing=1): NLL uniforme **4.2341**,
 train **2.3340**, val **2.3455** nats; perplexity val **10.44**.
 
-### 3.4 `data/prepare_corpus.py` — script di preparazione corpus
+### 3.4 `ronklm/models/bigram_neural.py` — classe `BigramNeural`
+
+Bigram appreso per discesa del gradiente (Fase 2): regressione softmax a un layer,
+`logits = onehot(x) @ W`. Gradiente derivato a mano (`probs − onehot(y)`).
+
+Attributi: `vocab_size: int`; `W: np.ndarray[float64]` shape `(V, V)` (pesi, init
+gaussiana piccola).
+
+Metodi:
+
+| Metodo | Firma | Effetto |
+|---|---|---|
+| `__init__` | `(self, vocab_size: int, rng: np.random.Generator, init_std: float = 0.01) -> None` | `W` gaussiana piccola |
+| `_softmax` | `(logits: np.ndarray) -> np.ndarray` *(staticmethod)* | softmax stabile (`- max`) sull'ultimo asse |
+| `forward` | `(self, x_idx: np.ndarray) -> np.ndarray` | indici `(B,)` → probabilità `(B, V)` |
+| `loss_and_grad` | `(self, x_idx, y_idx) -> tuple[float, np.ndarray]` | cross-entropy media e `dW` analitico |
+| `loss` | `(self, x_idx, y_idx) -> float` | solo la loss (per il gradient check) |
+| `train` | `(self, data, steps, lr, rng=None, batch_size=None, log_every=0) -> list[float]` | GD full-batch o minibatch stocastico; ritorna storia loss |
+| `train_from_counts` | `(self, N, steps, lr, log_every=0) -> list[float]` | GD full-batch **esatta** dai conteggi (O(V²)/passo); ritorna storia loss |
+| `nll` | `(self, data: np.ndarray) -> float` | NLL media in nats sulle coppie |
+| `probabilities` | `(self) -> np.ndarray` | `softmax(W)`: la `(V, V)` appresa, da confrontare con la `P` contata |
+| `generate` | `(self, rng, n, start=0) -> list[int]` | campionamento autoregressivo dalle prob. apprese |
+| `__repr__` | `(self) -> str` | `BigramNeural(vocab_size=…)` |
+
+**Numeri**: loss iniziale **4.2339** ≈ log 69 (sanity init); dopo 500 step full-batch
+NLL train/val **2.373/2.385** (→ converge al bigram a conteggio); gradient check
+errore relativo < 1e-4.
+
+### 3.5 `data/prepare_corpus.py` — script di preparazione corpus
 
 Funzioni (tutte a livello di modulo; script eseguibile con `python data/prepare_corpus.py [--force]`):
 
@@ -216,7 +247,18 @@ argomenti di funzione con default:
 
 ## 6. Catalogo dei test
 
-Runner: `python run_tests.py` (nessun pytest richiesto). **22 test, tutti verdi.**
+Runner: `python run_tests.py` (nessun pytest richiesto). **33 test, tutti verdi.**
+
+`tests/test_bigram_neural.py` (5):
+
+| Test | Cosa dimostra |
+|---|---|
+| `test_initial_loss_is_about_log_vocab` | loss iniziale ≈ log(V): il modello parte ~uniforme (sanity init) |
+| `test_minibatch_training_decreases_loss` | il ciclo stocastico su minibatch fa scendere la loss |
+| `test_converges_to_count_bigram` | la NLL appresa raggiunge quella del bigram a conteggio (±0.05) |
+| `test_learned_rows_match_counts_argmax` | dopo `q`, il carattere più probabile coincide coi conteggi |
+| `test_gradient_check_numerical_vs_analytic` | `dW` analitico ≈ numerico (differenze finite, err rel < 1e-4) |
+
 
 `tests/test_bigram_count.py` (6):
 

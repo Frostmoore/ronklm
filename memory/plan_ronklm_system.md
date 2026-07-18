@@ -655,7 +655,15 @@ cross-entropy/NLL.
 
 ---
 
-## ☐ Fase 2 — Bigram neurale (il gradiente a mano)
+## ☑ Fase 2 — Bigram neurale (il gradiente a mano)  ✅ COMPLETATA (2026-07-18)
+
+> **Esito**: `BigramNeural` in `ronklm/models/bigram_neural.py`, 5 test verdi (33
+> totali) incluso il **gradient check** numerico. Sanity init: loss iniziale
+> **4.2339 ≈ log 69**. Convergenza verso il bigram a conteggio (NLL neurale
+> train/val **2.373/2.385** vs conteggio 2.334/2.346; scarto medio |ΔP| **0.012**).
+> Gradiente `probs − onehot(y)` derivato a mano; via full-batch esatta dai
+> conteggi come bonus didattico. Branch `v1.4.0`.
+
 
 **Obiettivo didattico.** Ottenere *lo stesso identico risultato* della Fase 1 ma
 per una strada opposta: invece di **contare**, **imparare per tentativi
@@ -666,7 +674,7 @@ derivata fatta a mano su carta prima che in codice. **Questa è la fase più
 importante del progetto per la comprensione**: tutto ciò che viene dopo è questo
 stesso ciclo, ripetuto su funzioni più ricche.
 
-### ☐ 2.1 — Input one-hot e la matrice dei pesi `W`
+### ☑ 2.1 — Input one-hot e la matrice dei pesi `W`
 
 **Cosa**: rappresentare il carattere `i` come vettore one-hot (tutti 0, un 1 in
 posizione `i`); il modello è una sola matrice di pesi `W (vocab, vocab)`
@@ -694,7 +702,7 @@ Sanity check che faremo sempre: **alla partenza la loss deve valere ≈ log(voca
 (il modello non sa nulla → deve essere ≈ uniforme). Se non lo è, l'inizializzazione
 è sbagliata. Questo controllo da 30 secondi cattura una quantità sorprendente di bug.
 
-### ☐ 2.2 — Softmax: da logits a probabilità
+### ☑ 2.2 — Softmax: da logits a probabilità
 
 **Cosa**: `softmax(z)_j = exp(z_j) / Σ_k exp(z_k)`, implementata con il trucco di
 stabilità `z - max(z)`.
@@ -717,7 +725,7 @@ massimo non cambia *matematicamente* il risultato, ma porta il logit più grande
 matematica su carta e la matematica in float sono due discipline diverse**, e i
 NaN d'addestramento nascono quasi sempre in punti come questo.
 
-### ☐ 2.3 — La derivazione del gradiente (su carta, poi in codice)
+### ☑ 2.3 — La derivazione del gradiente (su carta, poi in codice)
 
 **Cosa**: derivare a mano `∂L/∂W` per la cross-entropy su softmax, documentando la
 derivazione completa passo-passo nel `codebase_reference.md`, e implementarla.
@@ -742,7 +750,7 @@ per tutte. La derivazione richiede la regola della catena e la derivata di softm
 (due casi: j uguale o diverso dalla classe vera) — la faremo per esteso nel
 reference, è mezz'ora di algebra e ripaga per sempre.
 
-### ☐ 2.4 — Il training loop: la discesa del gradiente
+### ☑ 2.4 — Il training loop: la discesa del gradiente
 
 **Cosa**: il ciclo canonico, scritto esplicito:
 
@@ -777,7 +785,7 @@ così: mille passi rumorosi ma economici battono un passo perfetto e costosissim
 (Il rumore ha perfino effetti benefici sulla generalizzazione.) Si chiama
 **Stochastic Gradient Descent**, la S è il batch casuale.
 
-### ☐ 2.5 — La verifica di convergenza: neurale ≡ conteggi
+### ☑ 2.5 — La verifica di convergenza: neurale ≡ conteggi
 
 **Cosa**: confrontare (a) NLL finale del bigram neurale vs quella del bigram
 contato; (b) `softmax(W)` riga per riga vs la `P` della Fase 1.
@@ -791,7 +799,7 @@ somigliare alle righe di `P`. Se accade, abbiamo la prova sperimentale che
 l'intero meccanismo forward→loss→backward→update funziona. Poche verifiche in
 tutto il progetto sono così nette.
 
-### ☐ 2.6 — Il gradient check numerico
+### ☑ 2.6 — Il gradient check numerico
 
 **Cosa**: per un piccolo sottoinsieme di pesi, stimare il gradiente "alla bruta"
 con le differenze finite centrali — `(L(w+h) − L(w−h)) / 2h` con `h ≈ 1e-5` — e
