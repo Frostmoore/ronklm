@@ -13,44 +13,9 @@ import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from ronklm.autograd import Tensor, cross_entropy  # noqa: E402
+from ronklm.autograd import Tensor, cat, cross_entropy  # noqa: E402
 
-
-def grad_check(build, leaves, h: float = 1e-6, tol: float = 1e-5) -> float:
-    """Confronta gradiente analitico e numerico per un'espressione scalare.
-
-    `build` e' una funzione senza argomenti che ricostruisce il grafo dai `leaves`
-    (i cui .data possono essere mutati) e ritorna un Tensor SCALARE. `leaves` sono i
-    tensori-foglia di cui verifichiamo il gradiente. Ritorna l'errore relativo massimo.
-    """
-    # --- gradiente analitico: un forward + un backward ---
-    for L in leaves:
-        L.zero_grad()
-    out = build()
-    assert out.data.size == 1, "grad_check richiede un output scalare"
-    out.backward()
-    analytic = [L.grad.copy() for L in leaves]
-
-    # --- gradiente numerico: due forward per ogni componente di ogni foglia ---
-    max_rel = 0.0
-    for k, L in enumerate(leaves):
-        num = np.zeros_like(L.data)
-        it = np.nditer(L.data, flags=["multi_index"])
-        while not it.finished:
-            idx = it.multi_index
-            orig = L.data[idx]
-            L.data[idx] = orig + h
-            lp = float(build().data)
-            L.data[idx] = orig - h
-            lm = float(build().data)
-            L.data[idx] = orig
-            num[idx] = (lp - lm) / (2 * h)  # differenza centrale (errore ~ h^2)
-            it.iternext()
-        denom = np.maximum(1e-8, np.abs(num) + np.abs(analytic[k]))
-        rel = np.abs(num - analytic[k]) / denom
-        max_rel = max(max_rel, float(rel.max()))
-    assert max_rel < tol, f"gradient check fallito: err rel max {max_rel:.2e}"
-    return max_rel
+from _gradcheck import grad_check  # noqa: E402
 
 
 def _rng():
@@ -220,6 +185,15 @@ def test_var():
     r = _rng()
     a = Tensor(r.normal(size=(4, 6)))
     grad_check(lambda: a.var(axis=-1).sum(), [a])
+
+
+def test_cat():
+    # concatenazione (multi-head): il gradiente si ri-spezza sui pezzi originali
+    r = _rng()
+    a = Tensor(r.normal(size=(2, 3)))
+    b = Tensor(r.normal(size=(2, 4)))
+    w = r.normal(size=(2, 7))
+    grad_check(lambda: (cat([a, b], axis=-1) * Tensor(w)).sum(), [a, b])
 
 
 if __name__ == "__main__":

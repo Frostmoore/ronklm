@@ -86,3 +86,31 @@ class Embedding(Module):
 
     def forward(self, idx: np.ndarray) -> Tensor:
         return self.weight.gather_rows(idx)
+
+
+class LayerNorm(Module):
+    """Normalizza ogni vettore (ultima dimensione) a media 0 e varianza 1, poi lo
+    riscala con due parametri APPRESI: gamma (guadagno) e beta (offset).
+
+    PERCHE' normalizzare: in una rete profonda la scala delle attivazioni di uno strato
+    dipende da tutti i precedenti, che stanno cambiando durante il training -> scale che
+    esplodono/collassano. LayerNorm ristabilisce a ogni blocco un riferimento fisso ->
+    training stabile e learning rate piu' alti.
+    PERCHE' gamma e beta: la normalizzazione pura toglie alla rete anche la liberta' di
+    VOLERE una scala diversa; i due parametri gliela restituiscono (default sano: gamma=1,
+    beta=0). PERCHE' LayerNorm e non BatchNorm: LayerNorm normalizza ogni posizione per
+    conto suo (nessun accoppiamento tra esempi, identica in training e generazione) ->
+    ideale per le sequenze. Tutta l'operazione e' composta da primitivi: backward automatico.
+    """
+
+    def __init__(self, dim: int, eps: float = 1e-5) -> None:
+        self.gamma = Tensor(np.ones(dim))
+        self.beta = Tensor(np.zeros(dim))
+        self.eps = eps
+
+    def forward(self, x: Tensor) -> Tensor:
+        mu = x.mean(axis=-1, keepdims=True)
+        var = x.var(axis=-1, keepdims=True)
+        xhat = (x - mu) / ((var + self.eps) ** 0.5)  # standardizza l'ultima dimensione
+        return xhat * self.gamma + self.beta          # riscala/trasla (parametri appresi)
+

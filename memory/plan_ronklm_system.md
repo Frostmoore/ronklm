@@ -1215,7 +1215,14 @@ attenzione come media pesata derivabile.
 
 ---
 
-## ☐ Fase 6 — Il blocco Transformer
+## ☑ Fase 6 — Il blocco Transformer  ✅ COMPLETATA (2026-07-18)
+
+> **Esito**: `nn.LayerNorm`, `autograd.cat`, `models/block.py` (MultiHeadAttention,
+> FeedForward 4x, Block pre-norm con residual). 6 test blocco + 1 gradient check cat
+> (66 totali): LayerNorm normalizza (media~0/var~1) e ha gradiente corretto, i
+> componenti preservano la shape (B,T,C), ogni parametro del blocco riceve
+> gradiente, un mini-LM col blocco addestra. **Milestone M3 completata.** Branch `v1.8.0`.
+
 
 **Obiettivo didattico.** Una testa di attention da sola non basta: serve il
 **blocco** — l'unità che i GPT ripetono N volte — e soprattutto serve capire i tre
@@ -1223,7 +1230,7 @@ componenti che *rendono possibile* impilare blocchi in profondità: multi-head,
 residual connections, LayerNorm. Questa fase è dove si impara *perché le reti
 profonde sono addestrabili* — che non è affatto ovvio.
 
-### ☐ 6.1 — Multi-head attention
+### ☑ 6.1 — Multi-head attention
 
 **Cosa**: `MultiHeadAttention`: `n_head` teste indipendenti (ognuna con le sue
 Q/K/V, dimensione `n_embd / n_head`), output concatenati e riproiettati con una
@@ -1241,7 +1248,7 @@ parità di budget, più sguardi piccoli battono un solo sguardo grande. La `Line
 finale dopo la concatenazione serve a *mescolare* i contributi delle teste, che
 altrimenti resterebbero segregati in fette separate del vettore.
 
-### ☐ 6.2 — Feed-forward network (FFN)
+### ☑ 6.2 — Feed-forward network (FFN)
 
 **Cosa**: `Linear(n_embd → 4·n_embd)` + `gelu` + `Linear(4·n_embd → n_embd)`,
 applicata a ogni posizione indipendentemente.
@@ -1256,7 +1263,7 @@ prima di ricomprimere; il valore 4 è la convenzione empirica di tutti i GPT (e 
 modelli reali la FFN contiene ~2/3 dei parametri totali — è lì che si ritiene
 risieda gran parte della "conoscenza" memorizzata).
 
-### ☐ 6.3 — LayerNorm, implementata a mano
+### ☑ 6.3 — LayerNorm, implementata a mano
 
 **Cosa**: `LayerNorm(n_embd)`: per ogni posizione, normalizza il suo vettore di
 feature a media 0 e varianza 1, poi riscala con due parametri appresi
@@ -1280,7 +1287,7 @@ normalizzazione è il più delicato che scriveremo (la media e la varianza dipen
 da tutti gli elementi del vettore: i gradienti si intrecciano) — gradient check
 obbligatorio e derivazione nel reference.
 
-### ☐ 6.4 — Il blocco: residual + pre-norm
+### ☑ 6.4 — Il blocco: residual + pre-norm
 
 **Cosa**: `block.py`:
 
@@ -1315,7 +1322,7 @@ resta intonsa da input a output. Empiricamente: la post-norm richiede warmup
 delicati per non divergere, la pre-norm è stabile. GPT-2 e tutti i successori sono
 pre-norm; anche noi.
 
-### ☐ 6.5 — Test del blocco
+### ☑ 6.5 — Test del blocco
 
 **Cosa**: forward su batch reale con shape verificate `(B,T,C) → (B,T,C)` (il
 blocco preserva la shape: è ciò che lo rende impilabile); backward completo con
@@ -1838,7 +1845,7 @@ un'architettura di cui possediamo ogni derivata. Fine del Percorso B.
 |---|---|---|
 | M1 — Dati & intuizione | 0–2 | Bigram neurale converge alla NLL del bigram contato (±0.01); gradient check ok |
 | M2 — Motore | 3–4 | `test_autograd.py` verde su ogni op; NLL(MLP) < NLL(bigram) su val |
-| M3 — Attenzione | 5–6 | Blocco transformer con gradient check ok e gradienti presenti su tutti i parametri |
+| M3 — Attenzione ✅ | 5–6 | Blocco transformer con gradient check ok e gradienti presenti su tutti i parametri |
 | M4 — GPT (NumPy) | 7 | NLL(GPT) < NLL(MLP) su val; generazione con temperature/top-k; checkpoint autosufficiente |
 | M5 — Prodotto A | 8 | Training da CLI riproducibile; tabella esperimenti; atlante verificato meccanicamente |
 | **M6 — Equivalenza** | 9 | `test_equivalence.py` verde: torch e NumPy danno stessi logits/gradienti/loss entro tolleranza |

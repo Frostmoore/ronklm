@@ -325,6 +325,22 @@ class Tensor:
 
 
 # ---- funzioni a livello di modulo -----------------------------------------
+def cat(tensors: list[Tensor], axis: int = -1) -> Tensor:
+    """Concatena piu' Tensor lungo `axis` (serve al multi-head: unire gli output delle
+    teste). Backward: il gradiente concatenato si RI-SPEZZA e va a ciascun pezzo."""
+    data = np.concatenate([t.data for t in tensors], axis=axis)
+    out = Tensor(data, tuple(tensors), "cat")
+    sizes = [t.data.shape[axis] for t in tensors]
+
+    def _backward():
+        splits = np.split(out.grad, np.cumsum(sizes)[:-1], axis=axis)
+        for t, g in zip(tensors, splits):
+            t.grad += g
+
+    out._backward = _backward
+    return out
+
+
 def cross_entropy(logits: Tensor, targets: np.ndarray) -> Tensor:
     """Cross-entropy media tra `logits` (B, V) e i target interi (B,), fusa e stabile.
 

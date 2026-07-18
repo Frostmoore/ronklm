@@ -86,6 +86,15 @@
   - [5.5 Guardare dentro: la heatmap di attenzione](#sec-5-5)
   - [5.6 Perché batte i limiti dell'MLP (e cosa manca ancora)](#sec-5-6)
   - [5.7 Glossario Fase 5 / cosa arriva in Fase 6](#sec-5-7)
+- [Fase 6 — Il blocco Transformer: perché le reti profonde funzionano](#fase-6)
+  - [6.0 L'unità che i GPT ripetono](#sec-6-0)
+  - [6.1 Multi-head: più sguardi in parallelo](#sec-6-1)
+  - [6.2 Feed-forward: comunicare e poi pensare](#sec-6-2)
+  - [6.3 LayerNorm: un riferimento fisso a ogni strato](#sec-6-3)
+  - [6.4 Le connessioni residue: l'autostrada del gradiente](#sec-6-4)
+  - [6.5 Pre-norm vs post-norm](#sec-6-5)
+  - [6.6 Il blocco è impilabile](#sec-6-6)
+  - [6.7 Glossario Fase 6 / cosa arriva in Fase 7](#sec-6-7)
 
 ---
 
@@ -2395,3 +2404,214 @@ sono addestrabili?", che non è affatto ovvia.
 ---
 
 *Fine del capitolo Fase 5.*
+
+---
+
+<a name="fase-6"></a>
+# Fase 6 — Il blocco Transformer: perché le reti profonde funzionano
+
+In Fase 5 abbiamo costruito una testa di attention. Ma una testa da sola non basta:
+serve il **blocco**, l'unità che i GPT ripetono decine di volte. E soprattutto serve
+capire tre ingredienti che rendono possibile *impilare* l'attention in profondità —
+tra cui il più importante e meno ovvio di tutto il deep learning: **perché una rete
+profonda è addestrabile**.
+
+📁 File: [`ronklm/models/block.py`](ronklm/models/block.py),
+[`ronklm/nn.py`](ronklm/nn.py) (LayerNorm)
+
+---
+
+<a name="sec-6-0"></a>
+## 6.0 L'unità che i GPT ripetono
+
+Un GPT è, essenzialmente, una pila di blocchi identici. Ogni blocco ha questa forma
+(dal codice):
+
+```python
+x = x + self.attn(self.ln1(x))    # comunica
+x = x + self.ffn(self.ln2(x))     # elabora
+```
+
+Quattro righe che contengono quattro idee: **multi-head attention** (`attn`),
+**feed-forward** (`ffn`), **LayerNorm** (`ln1`, `ln2`), e le **connessioni residue**
+(i due `x + ...`). Vediamole una per una — ognuna risolve un problema preciso.
+
+---
+
+<a name="sec-6-1"></a>
+## 6.1 Multi-head: più sguardi in parallelo
+
+In Fase 5 avevamo *una* testa. Il blocco ne usa diverse in parallelo
+(`MultiHeadAttention`): ognuna con le sue Q/K/V, e con dimensione `n_embd / n_head`
+(così il costo totale resta costante). Gli output delle teste si **concatenano** e si
+riproiettano con un `Linear` finale.
+
+> **📖 Concetto: perché più teste invece di una grande.** Una singola softmax produce
+> *una* distribuzione di attenzione per posizione: un solo "sguardo". Ma a una
+> posizione possono servire *contemporaneamente* informazioni diverse da posti diversi:
+> il carattere precedente (per l'ortografia), l'inizio della parola (per la
+> morfologia), l'apertura di virgolette molto indietro (per chiudere un dialogo). Teste
+> separate = sguardi paralleli, ognuno specializzabile in modo indipendente. Empiricamente,
+> a parità di budget, più sguardi piccoli battono un solo sguardo grande.
+
+> **🔧 Nel codice: perché la proiezione finale dopo la concatenazione.** Le teste
+> producono fette separate del vettore output. Senza un `Linear` finale, quelle fette
+> resterebbero segregate. La proiezione le **mescola**, permettendo alle informazioni
+> raccolte da teste diverse di combinarsi. (La concatenazione l'abbiamo aggiunta a
+> ronkgrad come operazione `cat`, col suo backward che ri-spezza il gradiente sui pezzi
+> — verificata col gradient check.)
+
+---
+
+<a name="sec-6-2"></a>
+## 6.2 Feed-forward: comunicare e poi pensare
+
+Dopo l'attention viene il **feed-forward** (`FeedForward`): due `Linear` con una
+non-linearità `gelu` in mezzo, che *espande* la dimensione di 4 volte e poi la
+ricomprime. Applicato a ogni posizione indipendentemente.
+
+> **📖 Concetto: la divisione dei ruoli.** L'attention *sposta* informazione tra
+> posizioni, ma la elabora poco (in fondo fa medie pesate). La FFN è il suo complemento
+> esatto: non guarda nessun'altra posizione, ma **elabora** — con una vera
+> non-linearità — ciò che l'attention ha raccolto. Il ritmo del transformer è:
+> **comunica** (attention) → **pensa** (FFN) → comunica → pensa… A ogni blocco, le
+> posizioni prima si scambiano informazione, poi ci ragionano su.
+
+> **📖 Perché l'espansione 4×.** Il fattore 4 dà alla FFN uno spazio interno più largo
+> dove computare prima di ricomprimere. È la convenzione empirica di *tutti* i GPT (e,
+> curiosità, nei modelli reali la FFN contiene ~2/3 di tutti i parametri: è lì che si
+> ritiene risieda gran parte della "conoscenza" memorizzata).
+
+---
+
+<a name="sec-6-3"></a>
+## 6.3 LayerNorm: un riferimento fisso a ogni strato
+
+Il `LayerNorm` (in [`nn.py`](ronklm/nn.py)) normalizza ogni vettore a media 0 e
+varianza 1, poi lo riscala con due parametri appresi `gamma` e `beta`.
+
+> **📖 Concetto: perché normalizzare.** In una rete profonda, la scala delle
+> attivazioni di uno strato dipende da *tutti* gli strati precedenti — che stanno
+> cambiando durante il training. Ogni strato insegue un bersaglio mobile, e le scale
+> possono esplodere o collassare strada facendo. LayerNorm ristabilisce, a ogni blocco,
+> un punto di riferimento fisso (media 0, varianza 1): il training diventa stabile e si
+> possono usare learning rate più alti. (Lo verifichiamo con un test: dato un input con
+> media 5 e scala 3, l'output ha media ~0 e deviazione ~1.)
+
+> **📖 Perché gamma e beta.** La normalizzazione pura è troppo autoritaria: toglie alla
+> rete anche la libertà di *volere* una scala diversa, se le serve. I due parametri
+> appresi gliela restituiscono, partendo da un default sano (`gamma=1`, `beta=0`).
+
+> **📖 Perché LayerNorm e non BatchNorm** (che magari incontrerai altrove). BatchNorm
+> normalizza *attraverso il batch*: accoppia esempi indipendenti tra loro, si comporta
+> diversamente in training e in generazione (dove il batch può essere 1), ed è un
+> vivaio storico di bug. LayerNorm normalizza ogni posizione *per conto suo*: nessun
+> accoppiamento, identica in training e inferenza. Per le sequenze non c'è partita, e i
+> transformer usano LayerNorm ovunque.
+
+Nel nostro codice LayerNorm è costruito *interamente* da operazioni primitive (`mean`,
+`var`, sottrazione, radice, moltiplicazione): quindi il suo backward — che è il più
+intricato che avremmo dovuto derivare a mano, perché media e varianza dipendono da
+tutti gli elementi del vettore — arriva **gratis** dall'autograd. È un altro trionfo
+della Fase 3.
+
+---
+
+<a name="sec-6-4"></a>
+## 6.4 Le connessioni residue: l'autostrada del gradiente
+
+Ecco l'idea più importante della fase, e forse la più importante del deep learning
+moderno dopo la backpropagation stessa. Guarda di nuovo la struttura del blocco:
+
+```python
+x = x + self.attn(self.ln1(x))    # NON  x = attn(...)
+x = x + self.ffn(self.ln2(x))     # NON  x = ffn(...)
+```
+
+Nota quel `x + `. Invece di *sostituire* `x` con l'output dello strato, lo **sommiamo**
+a `x`. Questa è la **connessione residua** (o "skip connection"), e sembra un dettaglio
+banale. Non lo è: è ciò che rende possibile addestrare reti profonde.
+
+> **📖 Concetto: il problema del gradiente che svanisce.** Per raggiungere i *primi*
+> strati di una rete profonda, il gradiente deve attraversare all'indietro, in catena,
+> tutti gli strati successivi, venendo moltiplicato a ogni passaggio. Il prodotto di
+> tanti fattori minori di 1 **svanisce esponenzialmente** (o esplode, se maggiori di 1).
+> Risultato: prima del 2015, le reti oltre ~20 strati *peggioravano* aggiungendo strati,
+> perché i primi non ricevevano più segnale utile.
+
+> **📖 La soluzione, e perché funziona.** Scrivere `x = x + f(x)` invece di `x = f(x)`.
+> Ricordi il backward della somma dalla [sezione 3.3](#sec-3-3)? — *distribuisce il
+> gradiente invariato* a entrambi i rami. Quindi il ramo `x` "nudo" è un'**autostrada**:
+> il gradiente della loss arriva ai primi strati **intatto**, qualunque cosa facciano
+> gli strati `f` in mezzo. È letteralmente il motivo per cui insistevamo, in Fase 3,
+> sul fatto che "la somma distribuisce il gradiente": questa riga di codice è il perché.
+
+C'è anche un secondo beneficio, per l'*apprendimento*: ogni blocco parte dal
+comportamento "non faccio niente" (se `f(x) ≈ 0`, il blocco è l'identità: l'input passa
+inalterato) e impara **correzioni incrementali** a un segnale che scorre, invece di
+dover ricostruire tutto da capo. Impilare 12 blocchi diventa sicuro: al peggio, i
+blocchi inutili restano vicini all'identità e non fanno danni.
+
+---
+
+<a name="sec-6-5"></a>
+## 6.5 Pre-norm vs post-norm
+
+Un dettaglio nella posizione del LayerNorm che ha conseguenze grandi. Noi lo mettiamo
+*dentro* il ramo, **prima** di attn/ffn (`x + attn(ln1(x))`): è la variante **pre-norm**.
+Il paper originale del 2017 lo metteva *dopo* la somma (post-norm).
+
+> **📖 Perché pre-norm.** Con la post-norm, il LayerNorm sta *sull'autostrada* e
+> rinormalizza il segnale a ogni blocco, disturbando proprio quel flusso pulito del
+> gradiente che le residual avevano costruito. Con la pre-norm, l'autostrada `x` resta
+> intonsa da input a output, e il LayerNorm agisce solo *dentro* i rami di calcolo.
+> Empiricamente: la post-norm richiede warmup delicati per non divergere, la pre-norm è
+> molto più stabile. GPT-2 e tutti i suoi successori sono pre-norm; anche noi.
+
+---
+
+<a name="sec-6-6"></a>
+## 6.6 Il blocco è impilabile
+
+Una proprietà che sembra tecnica ma è il punto di tutto: il blocco prende un input di
+forma `(B, T, n_embd)` e restituisce un output della **stessa forma** `(B, T, n_embd)`.
+
+> **🔧 Perché conta.** Siccome ingresso e uscita hanno la stessa forma, i blocchi si
+> possono **incastrare uno dopo l'altro** all'infinito: l'output del blocco 1 è un input
+> valido per il blocco 2, e così via. È ciò che permette di costruire un GPT "profondo"
+> semplicemente ripetendo `Block` N volte. Lo verifichiamo con un test
+> (`test_block_preserves_shape`), e con un altro (`test_block_all_params_get_gradient`)
+> controlliamo che *ogni* parametro del blocco riceva gradiente — il modo meccanico di
+> scoprire un componente scollegato per errore dal grafo.
+
+Con la Fase 6 abbiamo in mano il **mattone completo del GPT**, testato e compreso.
+Manca solo assemblarlo.
+
+---
+
+<a name="sec-6-7"></a>
+## 6.7 Glossario Fase 6 / cosa arriva in Fase 7
+
+Nuovi termini:
+
+- **Multi-head attention**: più teste di attention in parallelo, concatenate e
+  riproiettate.
+- **Feed-forward (FFN)**: la sotto-rete che elabora ogni posizione dopo l'attention
+  (espansione 4×, gelu).
+- **LayerNorm**: normalizzazione per-posizione a media 0/varianza 1, con `gamma`/`beta`
+  appresi.
+- **Connessione residua (skip connection)**: `x + f(x)`, l'autostrada che fa arrivare
+  il gradiente intatto ai primi strati.
+- **Pre-norm / post-norm**: LayerNorm dentro il ramo (prima di attn/ffn) vs dopo la
+  somma; pre-norm è più stabile.
+- **Blocco transformer**: l'unità `attn → ffn` con residual e norm, impilabile.
+
+**In Fase 7** metteremo tutto insieme nel **GPT completo**: uno stack di blocchi, con
+in più i **positional embedding** (che risolvono la cecità all'ordine notata in [Fase
+5.6](#sec-5-6)) e la testa finale. E costruiremo la **generazione autoregressiva** con
+le sue manopole — `temperature` e `top-k`. Sarà **RonkLM v1**: un vero GPT giocattolo
+che scrive pseudo-Collodi, carattere per carattere.
+
+---
+
+*Fine del capitolo Fase 6.*

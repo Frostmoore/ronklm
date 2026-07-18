@@ -5,9 +5,9 @@
 > aprire i file**. Se per sapere la firma di un metodo bisogna leggere il sorgente,
 > questo documento ha fallito.
 >
-> **Stato**: aggiornato a fine **Fase 5** (2026-07-18). Copre corpus, tokenizer,
-> dataset, bigram, autograd, nn/optim, MLP, self-attention, test. Piano in
-> [`plan_ronklm_system.md`](plan_ronklm_system.md).
+> **Stato**: aggiornato a fine **Fase 6** (2026-07-18). Copre corpus, tokenizer,
+> dataset, bigram, autograd, nn/optim, MLP, self-attention, blocco transformer, test.
+> Milestone M1/M2/M3 completate. Piano in [`plan_ronklm_system.md`](plan_ronklm_system.md).
 >
 > **Verifica meccanica firme**: eseguita a fine Fase 0 con estrazione `def`/`class`
 > via grep e confronto con le tabelle qui sotto. ✅ Allineato.
@@ -30,6 +30,8 @@
 | Ottimizzatori (SGD/AdamW) | [`ronklm/optim.py`](../ronklm/optim.py) (Fase 4) |
 | MLP a contesto (Fase 4) | `MLP` in [`ronklm/models/mlp.py`](../ronklm/models/mlp.py) |
 | Self-attention causale (Fase 5) | `Head`, `AttentionLM` in [`ronklm/models/attention.py`](../ronklm/models/attention.py) |
+| Blocco transformer (Fase 6) | `Block`, `MultiHeadAttention`, `FeedForward` in [`ronklm/models/block.py`](../ronklm/models/block.py) |
+| LayerNorm (Fase 6) | `LayerNorm` in [`ronklm/nn.py`](../ronklm/nn.py) · `cat` in [`ronklm/autograd.py`](../ronklm/autograd.py) |
 | Eseguire tutti i test | `python run_tests.py` (radice) |
 | Runner di test senza pytest | [`tests/_runner.py`](../tests/_runner.py) |
 | Versione del pacchetto | `__version__` in [`ronklm/__init__.py`](../ronklm/__init__.py) |
@@ -57,16 +59,19 @@ RonkLM/
 │       ├── bigram_count.py    # BigramCount (Fase 1)
 │       ├── bigram_neural.py   # BigramNeural (Fase 2)
 │       ├── mlp.py             # MLP (Fase 4)
-│       └── attention.py       # Head, AttentionLM (Fase 5)
+│       ├── attention.py       # Head, AttentionLM (Fase 5)
+│       └── block.py           # Block, MultiHeadAttention, FeedForward (Fase 6)
 ├── tests/
 │   ├── _runner.py             # run(namespace) -> n_fallimenti
+│   ├── _gradcheck.py          # grad_check condiviso (autograd + block)
 │   ├── test_tokenizer.py      # 8 test
 │   ├── test_dataset.py        # 8 test
 │   ├── test_bigram_count.py   # 6 test
 │   ├── test_bigram_neural.py  # 5 test
-│   ├── test_autograd.py       # 23 gradient check
+│   ├── test_autograd.py       # 24 gradient check
 │   ├── test_mlp.py            # 5 test
-│   └── test_attention.py      # 4 test
+│   ├── test_attention.py      # 4 test
+│   └── test_block.py          # 6 test
 ├── run_tests.py               # lancia tutti i tests/test_*.py
 ├── explain.md                 # libro di testo: spiegazione didattica per fase
 ├── requirements.txt           # numpy (+ matplotlib opz., torch dalla Fase 9)
@@ -75,10 +80,12 @@ RonkLM/
 └── .gitignore
 ```
 
-**NON esiste ancora** (per evitare ricerche a vuoto): nessun `LayerNorm`/`MultiHead`/
-`FeedForward` (arrivano in Fase 6), nessun blocco transformer (`models/block.py`, Fase
-6), nessun GPT (`models/gpt.py`, Fase 7). Esistono: bigram conteggio (1), bigram
-neurale (2), autograd (3), nn+optim+MLP (4), self-attention `Head`+`AttentionLM` (5).
+**NON esiste ancora** (per evitare ricerche a vuoto): nessun GPT completo
+(`models/gpt.py`, Fase 7) con positional embedding e stack di blocchi; nessuna
+generazione con temperature/top-k; nessun salvataggio checkpoint; nessuna CLI (Fase 8).
+Esistono: bigram conteggio (1), neurale (2), autograd (3), nn+optim+MLP (4),
+self-attention (5), blocco transformer completo `Block`+`MultiHeadAttention`+
+`FeedForward`+`LayerNorm` (6).
 
 ---
 
@@ -312,7 +319,23 @@ Classe `AttentionLM` (mini-LM di prova). Attributi: `tok` (Embedding), `head` (H
 **Numeri**: NLL val **2.328** (≈ bigram — una testa senza positional embedding è cieca
 all'ordine; la potenza arriva in F6/F7). Attention verificata causale e normalizzata.
 
-### 3.10 `data/prepare_corpus.py` — script di preparazione corpus
+### 3.10 `ronklm/models/block.py` — blocco Transformer (Fase 6)
+
+| Classe | Firma `__init__` / `forward` | Effetto |
+|---|---|---|
+| `MultiHeadAttention` | `(n_embd, n_head, block_size, rng)` / `(x)->Tensor` | `n_head` `Head` in parallelo → `cat` → `proj`; shape invariata |
+| `FeedForward` | `(n_embd, rng)` / `(x)->Tensor` | `Linear(→4·n_embd) → gelu → Linear(→n_embd)` |
+| `Block` | `(n_embd, n_head, block_size, rng)` / `(x)->Tensor` | `x = x + attn(ln1(x)); x = x + ffn(ln2(x))` (pre-norm + residual) |
+
+`nn.LayerNorm(dim, eps=1e-5)`: normalizza l'ultima dim a media 0/var 1, poi
+`* gamma + beta` (parametri appresi). Tutto composito → backward automatico.
+
+`autograd.cat(tensors, axis=-1) -> Tensor`: concatena; backward ri-spezza il gradiente.
+
+**Verificato**: LayerNorm normalizza e supera il gradient check; Block preserva la
+shape `(B,T,C)` ed è impilabile; ogni parametro riceve gradiente.
+
+### 3.11 `data/prepare_corpus.py` — script di preparazione corpus
 
 Funzioni (tutte a livello di modulo; script eseguibile con `python data/prepare_corpus.py [--force]`):
 
@@ -371,7 +394,19 @@ argomenti di funzione con default:
 
 ## 6. Catalogo dei test
 
-Runner: `python run_tests.py` (nessun pytest richiesto). **65 test, tutti verdi.**
+Runner: `python run_tests.py` (nessun pytest richiesto). **66 test, tutti verdi.**
+
+`tests/test_block.py` (6):
+
+| Test | Cosa dimostra |
+|---|---|
+| `test_layernorm_normalizes` | output a media ~0 e varianza ~1 sull'ultima dim |
+| `test_layernorm_gradcheck` | gradiente di LayerNorm corretto (x, gamma, beta) |
+| `test_multihead_and_ffn_preserve_shape` | MHA e FFN: `(B,T,C)` → `(B,T,C)` |
+| `test_block_preserves_shape` | il blocco preserva la shape (impilabile) |
+| `test_block_all_params_get_gradient` | ogni parametro del blocco riceve gradiente |
+| `test_block_lm_trains` | un mini-LM con un Block addestra (loss in calo) |
+
 
 `tests/test_attention.py` (4):
 
