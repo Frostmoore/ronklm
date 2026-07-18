@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.env
+
+# Checkpoint e artefatti di training (binari pesanti, fuori dalla storia git)
+*.npz
+*.pt
+*.ckpt
+checkpoints/
+runs/
+*.log
+
+# Corpus grande (Percorso B) — riproducibile via script, non versionato
+data/corpus_b/
+data/*.bin
+
+# Grafici generati
+*.png
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
