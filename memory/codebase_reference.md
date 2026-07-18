@@ -5,8 +5,8 @@
 > aprire i file**. Se per sapere la firma di un metodo bisogna leggere il sorgente,
 > questo documento ha fallito.
 >
-> **Stato**: aggiornato a fine **Fase 4** (2026-07-18). Copre corpus, tokenizer,
-> dataset, bigram (conteggio/neurale), autograd, nn/optim, MLP, test. Piano in
+> **Stato**: aggiornato a fine **Fase 5** (2026-07-18). Copre corpus, tokenizer,
+> dataset, bigram, autograd, nn/optim, MLP, self-attention, test. Piano in
 > [`plan_ronklm_system.md`](plan_ronklm_system.md).
 >
 > **Verifica meccanica firme**: eseguita a fine Fase 0 con estrazione `def`/`class`
@@ -29,6 +29,7 @@
 | Layer riusabili (Module/Linear/Embedding) | [`ronklm/nn.py`](../ronklm/nn.py) (Fase 4) |
 | Ottimizzatori (SGD/AdamW) | [`ronklm/optim.py`](../ronklm/optim.py) (Fase 4) |
 | MLP a contesto (Fase 4) | `MLP` in [`ronklm/models/mlp.py`](../ronklm/models/mlp.py) |
+| Self-attention causale (Fase 5) | `Head`, `AttentionLM` in [`ronklm/models/attention.py`](../ronklm/models/attention.py) |
 | Eseguire tutti i test | `python run_tests.py` (radice) |
 | Runner di test senza pytest | [`tests/_runner.py`](../tests/_runner.py) |
 | Versione del pacchetto | `__version__` in [`ronklm/__init__.py`](../ronklm/__init__.py) |
@@ -55,7 +56,8 @@ RonkLM/
 │       ├── __init__.py
 │       ├── bigram_count.py    # BigramCount (Fase 1)
 │       ├── bigram_neural.py   # BigramNeural (Fase 2)
-│       └── mlp.py             # MLP (Fase 4)
+│       ├── mlp.py             # MLP (Fase 4)
+│       └── attention.py       # Head, AttentionLM (Fase 5)
 ├── tests/
 │   ├── _runner.py             # run(namespace) -> n_fallimenti
 │   ├── test_tokenizer.py      # 8 test
@@ -63,7 +65,8 @@ RonkLM/
 │   ├── test_bigram_count.py   # 6 test
 │   ├── test_bigram_neural.py  # 5 test
 │   ├── test_autograd.py       # 23 gradient check
-│   └── test_mlp.py            # 5 test
+│   ├── test_mlp.py            # 5 test
+│   └── test_attention.py      # 4 test
 ├── run_tests.py               # lancia tutti i tests/test_*.py
 ├── explain.md                 # libro di testo: spiegazione didattica per fase
 ├── requirements.txt           # numpy (+ matplotlib opz., torch dalla Fase 9)
@@ -72,11 +75,10 @@ RonkLM/
 └── .gitignore
 ```
 
-**NON esiste ancora** (per evitare ricerche a vuoto): nessun `LayerNorm` (arriva in
-Fase 6, in `nn.py`), nessuna attention (`models/attention.py`, Fase 5), nessun blocco
-transformer (`models/block.py`, Fase 6), nessun GPT (`models/gpt.py`, Fase 7). Il
-`Sequential` citato nel piano non è stato necessario. Esistono: bigram conteggio (1),
-bigram neurale (2), autograd (3), nn+optim+MLP (4).
+**NON esiste ancora** (per evitare ricerche a vuoto): nessun `LayerNorm`/`MultiHead`/
+`FeedForward` (arrivano in Fase 6), nessun blocco transformer (`models/block.py`, Fase
+6), nessun GPT (`models/gpt.py`, Fase 7). Esistono: bigram conteggio (1), bigram
+neurale (2), autograd (3), nn+optim+MLP (4), self-attention `Head`+`AttentionLM` (5).
 
 ---
 
@@ -287,7 +289,30 @@ MLP a contesto fisso (Fase 4): `Embedding → concat → Linear+tanh → Linear`
 
 **Numeri**: NLL val **1.897** (< bigram 2.346), train **1.81** (overfitting gap).
 
-### 3.9 `data/prepare_corpus.py` — script di preparazione corpus
+### 3.9 `ronklm/models/attention.py` — self-attention (Fase 5)
+
+Classe `Head` (una testa causale). Attributi: `head_size`; `key`,`query`,`value`
+(`Linear` senza bias); `mask` (bool `(block,block)`, True sopra diagonale); `scale`
+(`1/√head_size`); `last_att` (np.ndarray, l'ultima matrice di attenzione per l'ispezione).
+
+| Metodo | Firma | Effetto |
+|---|---|---|
+| `__init__` | `(self, n_embd, head_size, block_size, rng)` | crea le 3 proiezioni + maschera |
+| `forward` | `(self, x: Tensor) -> Tensor` | `(B,T,C)` → `(B,T,head_size)`: `softmax(mask(q·kᵀ/√H)) · v`, salva `last_att` |
+
+Classe `AttentionLM` (mini-LM di prova). Attributi: `tok` (Embedding), `head` (Head),
+`lm_head` (Linear).
+
+| Metodo | Firma | Effetto |
+|---|---|---|
+| `__init__` | `(self, vocab_size, block_size, n_embd, rng)` | — |
+| `logits` | `(self, x_idx) -> Tensor` | `(B,T)` → `(B,T,vocab)` |
+| `loss` | `(self, x_idx, y_idx) -> Tensor` | CE su tutte le `B·T` posizioni |
+
+**Numeri**: NLL val **2.328** (≈ bigram — una testa senza positional embedding è cieca
+all'ordine; la potenza arriva in F6/F7). Attention verificata causale e normalizzata.
+
+### 3.10 `data/prepare_corpus.py` — script di preparazione corpus
 
 Funzioni (tutte a livello di modulo; script eseguibile con `python data/prepare_corpus.py [--force]`):
 
@@ -346,7 +371,17 @@ argomenti di funzione con default:
 
 ## 6. Catalogo dei test
 
-Runner: `python run_tests.py` (nessun pytest richiesto). **61 test, tutti verdi.**
+Runner: `python run_tests.py` (nessun pytest richiesto). **65 test, tutti verdi.**
+
+`tests/test_attention.py` (4):
+
+| Test | Cosa dimostra |
+|---|---|
+| `test_head_output_shape` | Head: `(B,T,C)` → `(B,T,head_size)` |
+| `test_attention_is_causal_and_normalized` | att triangolare inferiore, righe sommano a 1 |
+| `test_attention_gradients_flow` | tutti i parametri (Q,K,V,…) ricevono gradiente |
+| `test_attention_lm_trains` | l'AttentionLM addestra: loss scende sotto l'uniforme |
+
 
 `tests/test_mlp.py` (5):
 

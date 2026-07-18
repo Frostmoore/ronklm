@@ -77,6 +77,15 @@
   - [4.6 L'overfitting, dal vivo](#sec-4-6)
   - [4.7 I numeri e il testo generato](#sec-4-7)
   - [4.8 Il limite dell'MLP e cosa arriva in Fase 5](#sec-4-8)
+- [Fase 5 — Self-attention: il cuore del transformer](#fase-5)
+  - [5.0 L'idea in una frase](#sec-5-0)
+  - [5.1 Query, Key, Value: la metafora onesta](#sec-5-1)
+  - [5.2 I punteggi di affinità e lo scaling 1/√d](#sec-5-2)
+  - [5.3 La maschera causale: la freccia del tempo](#sec-5-3)
+  - [5.4 La media pesata dei value](#sec-5-4)
+  - [5.5 Guardare dentro: la heatmap di attenzione](#sec-5-5)
+  - [5.6 Perché batte i limiti dell'MLP (e cosa manca ancora)](#sec-5-6)
+  - [5.7 Glossario Fase 5 / cosa arriva in Fase 6](#sec-5-7)
 
 ---
 
@@ -2151,3 +2160,238 @@ e lo costruiremo da zero, una testa alla volta.
 ---
 
 *Fine del capitolo Fase 4.*
+
+---
+
+<a name="fase-5"></a>
+# Fase 5 — Self-attention: il cuore del transformer
+
+Questo è il meccanismo che ha cambiato l'intelligenza artificiale (il paper del 2017
+si intitolava "Attention is All You Need"). Lo costruiamo da zero, riga per riga, una
+testa alla volta. Preparati: è più semplice di quanto la sua fama suggerisca — è, alla
+fine, una media pesata intelligente.
+
+📁 File: [`ronklm/models/attention.py`](ronklm/models/attention.py)
+
+---
+
+<a name="sec-5-0"></a>
+## 5.0 L'idea in una frase
+
+L'MLP aveva un contesto **rigido**: 8 caratteri, sempre, concatenati in posizioni
+fisse ([sezione 4.8](#sec-4-8)). La self-attention lo sostituisce con qualcosa di
+radicalmente più flessibile:
+
+> **Ogni posizione della sequenza decide da sola, dinamicamente, a quali posizioni
+> precedenti prestare attenzione e quanto — con pesi calcolati dai dati stessi a ogni
+> forward.**
+
+"Dinamicamente" è la parola chiave. Nell'MLP i pesi erano fissi dopo il training. Qui,
+*quali* posizioni contano viene ricalcolato a ogni singolo input, in base al contenuto.
+Una posizione che è una vocale finale può "cercare" l'ultima consonante; un carattere
+dopo una virgola può cercare l'inizio della frase. E le stesse regole valgono per tutte
+le posizioni: ciò che si impara si trasferisce ovunque nella sequenza.
+
+---
+
+<a name="sec-5-1"></a>
+## 5.1 Query, Key, Value: la metafora onesta
+
+Ogni posizione emette **tre** vettori, ottenuti dallo stesso embedding con tre matrici
+diverse (tutte apprese — sono i `Linear` `query`, `key`, `value` del codice):
+
+- **query** ("che cosa sto cercando"): es. *sono una vocale finale, cerco una
+  consonante forte da qualche parte prima di me*.
+- **key** ("come mi faccio trovare"): es. *sono una `r` a inizio sillaba, ecco la mia
+  etichetta*.
+- **value** ("l'informazione che consegno se qualcuno mi sceglie"): può essere diversa
+  da come mi faccio trovare — chiave e contenuto sono ruoli distinti.
+
+> **📖 Concetto: come si "cercano" a vicenda.** L'affinità tra la query della posizione
+> `t` e la key della posizione `s` si misura con un **prodotto scalare** (`q · k`):
+> due vettori simili danno prodotto grande, due diversi danno prodotto piccolo. Un
+> prodotto scalare grande significa "questi due si cercavano": la posizione `t`
+> attingerà molto dal value di `s`. Tutto — cosa cercare, come farsi trovare, cosa
+> consegnare — è **appreso dal gradiente**: noi forniamo solo il meccanismo, il
+> training riempie le tre matrici.
+
+Nel codice:
+
+```python
+k = self.key(x)      # (B, T, head_size)   "come mi faccio trovare"
+q = self.query(x)    # (B, T, head_size)   "cosa cerco"
+v = self.value(x)    # (B, T, head_size)   "cosa consegno"
+```
+
+---
+
+<a name="sec-5-2"></a>
+## 5.2 I punteggi di affinità e lo scaling 1/√d
+
+Calcoliamo l'affinità tra *ogni* coppia di posizioni: la query di `t` contro la key di
+ogni `s`. È un prodotto matriciale `q @ kᵀ` che produce una matrice `(T, T)` di
+punteggi (la cella `(t, s)` = quanto `t` è compatibile con `s`):
+
+```python
+scores = (q @ k.transpose(1, 2)) * self.scale     # (B, T, T)
+```
+
+Nota quel `* self.scale`, dove `scale = 1/√head_size`. È la famosa domanda d'esame sui
+transformer, e la spieghiamo per bene.
+
+> **📖 Concetto: perché dividere per √d.** Il prodotto scalare di due vettori di
+> dimensione `d`, con componenti indipendenti a varianza 1, ha varianza `d` — cioè i
+> punteggi crescono con la radice della dimensione, per pura statistica, non perché le
+> affinità siano più nette. Punteggi grandi, dati in pasto a una softmax, la
+> **saturano**: quasi tutta la probabilità finisce su una sola posizione, e nelle
+> zone sature la derivata della softmax è ~0 → **il gradiente non passa** → le matrici
+> Q e K smettono di imparare proprio all'inizio, quando dovrebbero imparare di più.
+> Dividere per `√d` riporta la varianza dei punteggi a ~1 e tiene la softmax nella sua
+> zona "viva". Una singola costante, messa lì per far fluire il gradiente.
+
+---
+
+<a name="sec-5-3"></a>
+## 5.3 La maschera causale: la freccia del tempo
+
+C'è un problema. Il nostro compito è predire il *prossimo* carattere. Se la posizione
+`t` potesse attingere dalle posizioni *future*, durante il training vedrebbe **la
+risposta** dentro l'input: loss bassissima, e modello inutile in generazione (dove il
+futuro ancora non esiste). Dobbiamo impedirlo.
+
+> **📖 Concetto: la maschera causale.** Prima della softmax, mettiamo a `−∞` tutti i
+> punteggi `(t, s)` con `s > t` — cioè la posizione `t` non può guardare oltre sé
+> stessa. Dopo la softmax, `exp(−∞) = 0`: quelle celle pesano esattamente zero, e la
+> normalizzazione si redistribuisce automaticamente sulle sole posizioni lecite (`s ≤
+> t`). "Causale" perché rispetta la causa-effetto temporale: il presente dipende solo
+> dal passato.
+
+```python
+scores = scores.masked_fill(self.mask[:T, :T], -1e9)   # -inf sopra la diagonale
+att = scores.softmax(axis=-1)                          # righe che sommano a 1
+```
+
+> **🔧 Perché `−∞` *prima* della softmax e non azzerare *dopo*.** Se azzerassimo dopo,
+> le righe non sommerebbero più a 1 (non sarebbero più distribuzioni di probabilità).
+> Mettere `−∞` prima fa sì che la softmax stessa ridistribuisca correttamente il peso
+> solo sulle posizioni legali.
+
+> **🔧 Il legame con la Fase 0.** È questa maschera che permette di addestrare *tutte*
+> le T posizioni della finestra in un solo forward, ciascuna col proprio contesto
+> legale — il trucco "T esempi al prezzo di uno" promesso in [Fase 0.8](#sec-0-8). (In
+> gergo: un transformer fatto solo di questi blocchi mascherati si chiama
+> "decoder-only"; i GPT sono tutti così.)
+
+---
+
+<a name="sec-5-4"></a>
+## 5.4 La media pesata dei value
+
+Ultimo passo: usare i pesi di attenzione per mescolare i value.
+
+```python
+out = att @ v      # (B, T, T) @ (B, T, head_size) = (B, T, head_size)
+```
+
+> **📖 Concetto: l'output è una media pesata convessa.** Ogni riga di `att` è una
+> distribuzione di probabilità sulle posizioni passate (somma 1). Quindi `att @ v` è,
+> per ogni posizione, una **miscela dosata dei value del passato**: prendi tanto del
+> value di `s` quanto la posizione `t` gli ha dato attenzione. La softmax qui non
+> produce "probabilità di essere giusto" come in Fase 2, ma un **meccanismo di
+> indirizzamento morbido e derivabile**: un po' come leggere da una memoria dove,
+> invece di scegliere *una* cella, leggi un mix pesato di tutte. Ed è proprio la
+> morbidezza (invece di una scelta netta) a rendere il meccanismo addestrabile per
+> gradiente: una scelta rigida non sarebbe derivabile.
+
+---
+
+<a name="sec-5-5"></a>
+## 5.5 Guardare dentro: la heatmap di attenzione
+
+Una delle poche finestre *dirette* sull'interno di una rete neurale è proprio la
+matrice di attenzione: si può letteralmente *vedere* a cosa guarda il modello. Abbiamo
+addestrato brevemente un mini-LM a una testa e stampato la sua attenzione sulla frase
+`"Geppetto guarda"` (ogni riga `t` mostra quanto attinge da ogni posizione `s ≤ t`; i
+puntini sono il futuro mascherato):
+
+```
+        G    e    p    p    e    t    t    o    _    g    u    a    r    d    a
+  G | 1.00   .    .    .    .    .    .    .    .    .    .    .    .    .    .
+  e | 0.21 0.79   .    .    .    .    .    .    .    .    .    .    .    .    .
+  p | 0.01 0.00 0.99   .    .    .    .    .    .    .    .    .    .    .    .
+  p | 0.01 0.00 0.50 0.50   .    .    .    .    .    .    .    .    .    .    .
+  t | 0.00 0.00 0.00 0.00 0.00 1.00   .    .    .    .    .    .    .    .    .
+  o | 0.02 0.18 0.00 0.00 0.18 0.00 0.00 0.62   .    .    .    .    .    .    .
+  _ | 0.00 0.01 0.01 0.01 0.01 0.00 0.00 0.00 0.96   .    .    .    .    .    .
+  u | 0.01 0.00 0.00 0.00 0.00 0.01 0.01 0.01 0.00 0.05 0.90   .    .    .    .
+```
+
+Due cose saltano all'occhio, e sono la prova che il meccanismo funziona:
+
+1. **È rigorosamente triangolare.** Tutto ciò che sta a destra della diagonale (il
+   futuro) è vuoto: la maschera causale funziona.
+2. **Ha imparato pattern sensati.** La seconda `p` di "Geppetto" divide l'attenzione a
+   metà tra le due `p` (0.50/0.50); la `u` guarda fortissimo la `g` che la precede
+   (0.90, il gruppo "gu"); molte posizioni attingono al carattere immediatamente
+   precedente. Nessuno gliel'ha detto: l'ha imparato dal gradiente.
+
+Questa immagine rende concreto tutto il discorso Q/K/V come nessuna formula può fare.
+
+---
+
+<a name="sec-5-6"></a>
+## 5.6 Perché batte i limiti dell'MLP (e cosa manca ancora)
+
+L'attention risolve i tre limiti dell'MLP ([sezione 4.8](#sec-4-8)): il contesto è
+*dinamico* (ricalcolato a ogni input, non fisso); le stesse matrici Q/K/V valgono per
+tutte le posizioni (ciò che si impara si trasferisce); una posizione lontana è
+raggiungibile in un passo, non attraverso un collo di bottiglia.
+
+**Ma — e qui va detta la verità con onestà da ricercatore** — la nostra AttentionLM a
+una testa raggiunge NLL val **2.328**, appena sotto il bigram (2.35) e *peggio*
+dell'MLP (1.90). Come mai? Per due motivi che le prossime fasi risolveranno:
+
+> **📖 L'attention da sola è cieca all'ordine.** Il meccanismo è, per costruzione,
+> un'operazione su *insiemi*: se permuti i token di input, i prodotti `q · k` non
+> cambiano. Nulla, nel meccanismo, sa che un token viene *prima* di un altro. Ma "ma
+> la" ≠ "la ma": l'ordine è metà del linguaggio. Manca l'informazione di **posizione**,
+> che aggiungeremo in Fase 7 (positional embedding). Senza di essa, la nostra testa può
+> fare poco più che un bigram sofisticato.
+
+> **📖 Una testa sola vede poco.** Una singola softmax produce *un* solo "sguardo" per
+> posizione. Servono più sguardi paralleli (multi-head), più profondità (blocchi in
+> pila), e la parte che *elabora* dopo aver raccolto (il feed-forward). Arrivano tutti
+> in Fase 6.
+
+In altre parole: in Fase 5 abbiamo costruito e *capito* il mattone fondamentale, e
+verificato che funziona (causale, addestrabile, ispezionabile). La sua potenza si
+libererà quando lo comporremo. È esattamente il percorso giusto: prima il pezzo, poi
+la macchina.
+
+---
+
+<a name="sec-5-7"></a>
+## 5.7 Glossario Fase 5 / cosa arriva in Fase 6
+
+Nuovi termini:
+
+- **Self-attention**: meccanismo per cui ogni posizione aggrega informazione dalle
+  altre posizioni della *stessa* sequenza, con pesi appresi e dinamici.
+- **Query / Key / Value (Q/K/V)**: i tre vettori appresi per posizione — cosa cerco /
+  come mi faccio trovare / cosa consegno.
+- **Punteggio di attenzione**: il prodotto scalare `q · k`, misura di affinità.
+- **Scaling `1/√d`**: divisione dei punteggi per stabilizzare la softmax.
+- **Maschera causale**: azzerare l'attenzione verso il futuro (`s > t`).
+- **Decoder-only**: un transformer fatto solo di blocchi con maschera causale (i GPT).
+- **Attention map / heatmap**: la matrice `(T, T)` dei pesi di attenzione, ispezionabile.
+
+**In Fase 6** assembleremo il **blocco transformer**, l'unità che i GPT ripetono N
+volte. Introdurremo tre cose che rendono possibile *impilare* l'attention in
+profondità: **multi-head** (più sguardi paralleli), il **feed-forward** (la parte che
+*elabora* dopo che l'attention ha *comunicato*), e — soprattutto — le **connessioni
+residue** e il **LayerNorm**, ovvero la risposta alla domanda "perché le reti profonde
+sono addestrabili?", che non è affatto ovvia.
+
+---
+
+*Fine del capitolo Fase 5.*

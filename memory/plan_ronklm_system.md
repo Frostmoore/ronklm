@@ -1103,7 +1103,15 @@ inizializzazione, minibatch, train/val, AdamW.
 
 ---
 
-## ☐ Fase 5 — Self-attention (una testa, causale)
+## ☑ Fase 5 — Self-attention (una testa, causale)  ✅ COMPLETATA (2026-07-18)
+
+> **Esito**: `models/attention.py` — `Head` (Q/K/V, scaling 1/√H, maschera causale,
+> softmax, media pesata dei value) e `AttentionLM` di prova. 4 test (65 totali):
+> shape, **causalità** (att triangolare, righe = 1), gradienti, training.
+> Heatmap di attenzione ispezionata su frase reale. NLL val 2.328 (~bigram): come
+> previsto, una testa senza positional embedding è cieca all'ordine — la potenza
+> arriva con multi-head+blocchi (F6) e posizioni (F7). Branch `v1.7.0`.
+
 
 **Obiettivo didattico.** Il cuore del transformer, costruito da zero e capito riga
 per riga. L'idea in una frase: invece di un contesto rigido e concatenato (MLP),
@@ -1111,7 +1119,7 @@ per riga. L'idea in una frase: invece di un contesto rigido e concatenato (MLP),
 precedenti prestare attenzione e quanto**, con pesi di attenzione *calcolati dai
 dati stessi* a ogni forward.
 
-### ☐ 5.1 — L'intuizione Q/K/V prima del codice
+### ☑ 5.1 — L'intuizione Q/K/V prima del codice
 
 **Cosa**: sezione scritta (qui e nel reference) + le tre proiezioni lineari
 `query`, `key`, `value` in `attention.py`.
@@ -1135,7 +1143,7 @@ dell'MLP (4.2)**: i pesi di attenzione sono ricalcolati a ogni input (contesto
 (ciò che si impara si trasferisce ovunque nella sequenza), e una posizione lontana
 è raggiungibile in un passo, non attraverso un collo di bottiglia.
 
-### ☐ 5.2 — I punteggi e lo scaling `1/√d`
+### ☑ 5.2 — I punteggi e lo scaling `1/√d`
 
 **Cosa**: `scores = q @ kᵀ / sqrt(head_size)` — shape `(B, T, T)`: per ogni
 elemento del batch, una matrice T×T dove la cella `(t, s)` è l'affinità
@@ -1153,7 +1161,7 @@ varianza dei punteggi a ~1 e la softmax nella sua zona viva. Una singola costant
 messa lì per far fluire il gradiente: il transformer è pieno di scelte così, e
 questa è la più pulita da capire fino in fondo.
 
-### ☐ 5.3 — La maschera causale
+### ☑ 5.3 — La maschera causale
 
 **Cosa**: prima della softmax, porre a `−inf` tutte le celle `(t, s)` con `s > t`
 (matrice triangolare); dopo la softmax quelle celle valgono esattamente 0.
@@ -1172,7 +1180,7 @@ ciascuna col proprio contesto legale — il trucco "T esempi al prezzo di uno"
 promesso allora. ("Decoder-only" nel gergo = un transformer fatto solo di blocchi
 con questa maschera; i modelli GPT sono tutti così.)
 
-### ☐ 5.4 — Softmax e aggregazione dei value
+### ☑ 5.4 — Softmax e aggregazione dei value
 
 **Cosa**: `att = softmax(scores, axis=-1)` → `out = att @ v`, shape `(B, T, head_size)`.
 
@@ -1188,7 +1196,7 @@ questa sottofase: inseguire le shape dell'intera pipeline a mano,
 `(B,T,C) → q,k,v (B,T,H) → scores (B,T,T) → att (B,T,T) → out (B,T,H)`, e
 controllare che le righe di `att` sommino a 1 e rispettino la causalità.
 
-### ☐ 5.5 — Esperimento e ispezione
+### ☑ 5.5 — Esperimento e ispezione
 
 **Cosa**: (a) mini-LM con la sola testa di attention + proiezione ai logits,
 confrontato con l'MLP a parità di budget; (b) **visualizzazione delle matrici di
