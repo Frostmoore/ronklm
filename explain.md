@@ -55,6 +55,18 @@
   - [2.7 Il gradient check: come si verifica un gradiente](#sec-2-7)
   - [2.8 Un bonus elegante: allenare dai conteggi](#sec-2-8)
   - [2.9 Glossario Fase 2 / cosa arriva in Fase 3](#sec-2-9)
+- [Fase 3 — ronkgrad: costruire un mini-PyTorch](#fase-3)
+  - [3.0 Il problema: derivare a mano non scala](#sec-3-0)
+  - [3.1 L'idea: il grafo computazionale](#sec-3-1)
+  - [3.2 La classe Tensor: dati, gradiente, e "come tornare indietro"](#sec-3-2)
+  - [3.3 Le operazioni e i loro backward](#sec-3-3)
+  - [3.4 Il broadcasting all'indietro: il punto più insidioso](#sec-3-4)
+  - [3.5 Perché i gradienti si accumulano](#sec-3-5)
+  - [3.6 backward(): l'ordinamento topologico](#sec-3-6)
+  - [3.7 Le non-linearità e perché sono obbligatorie](#sec-3-7)
+  - [3.8 cross_entropy fusa: stabilità ed eleganza](#sec-3-8)
+  - [3.9 La prova: 18 gradient check e la precisione macchina](#sec-3-9)
+  - [3.10 Glossario Fase 3 / cosa arriva in Fase 4](#sec-3-10)
 
 ---
 
@@ -1501,3 +1513,359 @@ davvero quel `loss.backward()` che nei framework sembra magia.
 ---
 
 *Fine del capitolo Fase 2.*
+
+---
+
+<a name="fase-3"></a>
+# Fase 3 — ronkgrad: costruire un mini-PyTorch
+
+In Fase 2 abbiamo derivato un gradiente a mano: mezz'ora di algebra per **un** layer.
+Il GPT ne avrà decine, annidati. Derivare a mano *non scala*. In questa fase
+costruiamo **`ronkgrad`**, un motore di **differenziazione automatica** (~300 righe)
+che calcola i gradienti *da solo*. È concettualmente identico al cuore di PyTorch:
+dopo questa fase, quel `loss.backward()` che sembra magia non avrà più segreti, e non
+dovremo mai più derivare un gradiente a mano — ci basterà scrivere il *forward*.
+
+📁 File: [`ronklm/autograd.py`](ronklm/autograd.py)
+
+---
+
+<a name="sec-3-0"></a>
+## 3.0 Il problema: derivare a mano non scala
+
+Immagina di dover derivare a mano il gradiente di una rete come:
+
+```
+loss = cross_entropy( (x @ W1).tanh() @ W2 , y )
+```
+
+Dovresti applicare la regola della catena attraverso `cross_entropy`, poi `@ W2`, poi
+`tanh`, poi `@ W1` — e questo è un *giocattolo* con due soli strati. Un transformer
+ha embedding, decine di blocchi con attention e feed-forward, layernorm, connessioni
+residue. Derivare tutto a mano sarebbe centinaia di pagine di algebra, con un errore
+ogni tre righe. Serve **automatizzare la regola della catena**. È esattamente ciò che
+fa un motore di *autograd* (automatic gradient).
+
+---
+
+<a name="sec-3-1"></a>
+## 3.1 L'idea: il grafo computazionale
+
+Ecco l'intuizione che sblocca tutto. Qualsiasi calcolo, per quanto complicato, è una
+**catena di operazioni elementari**: somme, prodotti, prodotti-matrice, `tanh`,
+esponenziali… La nostra `loss` qui sopra è: prendi `x`, moltiplicalo per `W1`
+(matmul), applica `tanh`, moltiplica per `W2` (matmul), calcola la cross-entropy.
+Cinque operazioni elementari in fila.
+
+> **📖 Concetto: il grafo computazionale.** Mentre eseguiamo il forward (i calcoli in
+> avanti), possiamo *registrare chi ha prodotto cosa*. Ne risulta un **grafo**: i
+> nodi sono i tensori (i valori intermedi), e le frecce dicono "questo è stato
+> prodotto da quello tramite questa operazione". Il grafo è *diretto* (le frecce
+> hanno un verso) e *aciclico* (non si torna mai su sé stessi): in gergo un DAG.
+
+Perché registrarlo? Per il teorema fondante del calcolo differenziale: la derivata di
+una composizione di funzioni è il **prodotto delle derivate dei pezzi** (la regola
+della catena). Quindi, se *ogni operazione elementare sa calcolare la propria piccola
+derivata*, allora il gradiente della loss rispetto a **qualsiasi** tensore del grafo
+si ottiene camminando il grafo **all'indietro** e moltiplicando/accumulando quei
+pezzettini. Nessuno deve mai derivare la formula composta: la composizione avviene da
+sola, un'operazione alla volta.
+
+> **Questa è, letteralmente, la cosa che fa PyTorch.** Costruisce il grafo durante il
+> forward, lo percorre a ritroso nel backward. La differenza tra ronkgrad e PyTorch è
+> solo ingegneria (C++, GPU, fusione di operazioni), non concetto. Dopo questa fase,
+> quando userai PyTorch, saprai *esattamente* cosa succede sotto.
+
+---
+
+<a name="sec-3-2"></a>
+## 3.2 La classe Tensor: dati, gradiente, e "come tornare indietro"
+
+Il mattone è la classe `Tensor`, che avvolge un array NumPy e in più ricorda quattro
+cose:
+
+```python
+class Tensor:
+    def __init__(self, data, _prev=(), _op=""):
+        self.data = np.asarray(data, dtype=np.float64)  # i valori (il forward)
+        self.grad = np.zeros_like(self.data)            # il gradiente accumulato (il backward)
+        self._backward = lambda: None                   # come spingere il gradiente ai genitori
+        self._prev = _prev                              # i tensori da cui sono nato
+        self._op = _op                                  # etichetta (solo per debug)
+```
+
+- **`data`** sono i valori, quelli che calcoli in avanti.
+- **`grad`** è lo spazio dove si accumulerà `∂loss/∂questo_tensore`. Parte da zero.
+- **`_prev`** sono i "genitori": i tensori che hanno prodotto questo. È il grafo.
+- **`_backward`** è una piccola funzione, specifica di ogni operazione, che sa
+  prendere il gradiente *di questo* tensore e spingerlo ai genitori. Sui tensori
+  "foglia" (i dati e i pesi, che non nascono da nulla) è un no-op.
+
+Ogni volta che scrivi `c = a + b`, l'operazione crea il nuovo tensore `c`, ne imposta
+`_prev = (a, b)` e gli attacca la funzione `_backward` giusta per la somma. Il grafo
+si costruisce da solo, un'operazione alla volta, semplicemente *facendo i calcoli*.
+
+---
+
+<a name="sec-3-3"></a>
+## 3.3 Le operazioni e i loro backward
+
+Ogni operazione segue lo stesso schema: calcola il risultato in avanti, e definisce
+come il gradiente torna indietro. Vediamone tre, che sono la spina dorsale.
+
+**Somma** `c = a + b`. In avanti, somma elemento per elemento. All'indietro:
+
+```python
+def _backward():
+    self.grad += _unbroadcast(out.grad, self.data.shape)
+    other.grad += _unbroadcast(out.grad, other.data.shape)
+```
+
+Il gradiente passa **invariato** a entrambi gli addendi. La somma è un "distributore
+di gradiente": qualunque gradiente arrivi a `c`, lo copia identico su `a` e su `b`.
+
+> **📖 Ricorda questo fatto.** "La somma distribuisce il gradiente intatto" sembra
+> banale ora, ma è *precisamente* la ragione per cui le **connessioni residue** (Fase
+> 6) permettono di addestrare reti profonde: il ramo `x` in `x + f(x)` diventa
+> un'autostrada su cui il gradiente scorre senza attenuarsi. Ci torneremo.
+
+**Prodotto** `c = a * b`. All'indietro, ognuno riceve il gradiente moltiplicato per
+*l'altro*: `a.grad += b * out.grad`, e viceversa. (Quanto conta un fattore dipende da
+quanto vale l'altro: è la regola del prodotto del liceo.)
+
+**Prodotto matriciale** `C = A @ B`. Le formule sono `dA = dC @ Bᵀ` e `dB = Aᵀ @ dC`
+(dove ᵀ è la trasposta). Non le deriviamo qui (sono in gioco somme di indici), ma c'è
+un **controllo mnemonico che vale oro**:
+
+> **🔧 Nel codice: le shape devono tornare.** `dA` deve avere la stessa forma di `A`.
+> C'è un solo modo di combinare `dC`, `Bᵀ`, `Aᵀ` perché i conti delle dimensioni
+> quadrino — e quel modo è la formula giusta. Metà dei bug di backward si trovano
+> semplicemente guardando se le shape combaciano. Ci torneremo ossessivamente da qui
+> in poi.
+
+---
+
+<a name="sec-3-4"></a>
+## 3.4 Il broadcasting all'indietro: il punto più insidioso
+
+Questo è il pezzo tecnicamente più difficile dell'intero progetto, e il motivo per
+cui il nostro motore è *tensoriale* e non scalare. Concentrati un attimo.
+
+Ricordi il broadcasting ([sezione 1.3](#sec-1-3))? In avanti, NumPy ti lascia sommare
+un vettore `(V,)` a una matrice `(B, V)`: replica *virtualmente* il vettore su tutte
+le `B` righe. Comodissimo. Ma nel backward crea un problema.
+
+> **📖 Concetto: se un valore è stato usato B volte, riceve B gradienti.** Quel
+> vettore `(V,)`, nel forward, è stato sommato a *ognuna* delle B righe. Quindi
+> influenza la loss attraverso B strade diverse. Per la regola della derivata totale,
+> il suo gradiente è la **somma** dei B contributi. Ma il gradiente che arriva
+> "dall'alto" ha forma `(B, V)` — una riga di gradiente per ognuna delle B righe. Per
+> riportarlo alla forma `(V,)` del vettore originale, dobbiamo **sommare lungo la
+> dimensione che era stata replicata**: `grad.sum(axis=0)`.
+
+Se lo dimentichi, ottieni un gradiente di forma `(B, V)` dove ne serviva uno `(V,)`:
+o crasha (bug fortunato, te ne accorgi) o — peggio — un broadcasting silenzioso lo
+"aggiusta" in modo sbagliato e il training degrada senza un solo errore. Per gestirlo
+in un posto solo, abbiamo scritto la funzione `_unbroadcast`, usata da *tutti* i
+backward:
+
+```python
+def _unbroadcast(grad, shape):
+    while grad.ndim > len(shape):        # elimina le dimensioni in piu' davanti
+        grad = grad.sum(axis=0)
+    for i, dim in enumerate(shape):      # somma lungo gli assi che erano di taglia 1
+        if dim == 1 and grad.shape[i] != 1:
+            grad = grad.sum(axis=i, keepdims=True)
+    return grad
+```
+
+In pratica `_unbroadcast` "disfa" all'indietro esattamente ciò che il broadcasting
+aveva fatto in avanti. È il pezzo che micrograd (il motore didattico *scalare* di
+Karpathy) non ha bisogno di avere, perché non ha shape; noi sì, ed è la comprensione
+in più che ci portiamo a casa.
+
+---
+
+<a name="sec-3-5"></a>
+## 3.5 Perché i gradienti si accumulano
+
+Avrai notato che in ogni `_backward` scriviamo `+=`, non `=`. Non è un dettaglio.
+
+> **📖 Concetto: un tensore usato più volte somma i suoi gradienti.** Se lo stesso
+> tensore `a` compare in più punti del grafo — per esempio in `a * a`, oppure un peso
+> riusato — allora influenza la loss attraverso più strade, e il suo gradiente totale
+> è la **somma** dei contributi di ogni strada (di nuovo la regola della derivata
+> totale). Usare `=` invece di `+=` sovrascriverebbe il primo contributo con il
+> secondo: uno dei bug classici di chi scrive un autograd.
+
+Abbiamo un test apposta per questo (`test_reused_tensor_accumulates`): verifica che
+il gradiente di `a * a + a` sia corretto, cosa che richiede l'accumulo.
+
+> **🔧 Corollario che ogni utente PyTorch conosce.** Poiché i gradienti si accumulano,
+> *prima* di ogni nuovo backward vanno azzerati (in PyTorch: `optimizer.zero_grad()`).
+> Altrimenti si sommerebbero a quelli del passo precedente. Nel nostro motore, siccome
+> creiamo tensori freschi a ogni forward, gli intermedi partono già da zero; per i
+> pesi che riusiamo tra un passo e l'altro dovremo azzerare esplicitamente (lo faremo
+> nel training loop di Fase 4). Ora sai *perché* quel `zero_grad` esiste.
+
+---
+
+<a name="sec-3-6"></a>
+## 3.6 backward(): l'ordinamento topologico
+
+Come si orchestrano tutti i `_backward` nell'ordine giusto? Con il metodo
+`backward()`, che fa tre cose:
+
+```python
+def backward(self):
+    topo = []; visited = set()
+    def build(v):
+        if id(v) not in visited:
+            visited.add(id(v))
+            for parent in v._prev:
+                build(parent)
+            topo.append(v)
+    build(self)
+    self.grad = np.ones_like(self.data)   # dL/dL = 1: il seme
+    for v in reversed(topo):
+        v._backward()
+```
+
+1. **Costruisce l'ordinamento topologico** del grafo con una visita in profondità
+   (DFS). L'ordinamento topologico ha una proprietà cruciale: ogni nodo compare
+   *dopo* tutti i suoi genitori.
+2. **Semina** il gradiente della radice (la loss) a 1. Perché 1? Perché la derivata
+   della loss rispetto a sé stessa è 1: è il punto da cui parte tutta la catena.
+3. **Percorre l'ordinamento al contrario**, chiamando ogni `_backward`.
+
+> **📖 Concetto: perché serve l'ordinamento topologico.** Il `_backward` di un nodo
+> può eseguirsi correttamente solo quando il gradiente di quel nodo (`out.grad`) è
+> *completo* — cioè quando tutti i nodi che lo usano hanno già versato il loro
+> contributo. Percorrere il grafo in ordine topologico inverso garantisce esattamente
+> questo: quando tocca a un nodo, tutti i suoi "figli" (a valle) hanno già propagato.
+> Con un ordine sbagliato, un nodo propagherebbe un gradiente parziale, e il risultato
+> sarebbe silenziosamente errato.
+
+---
+
+<a name="sec-3-7"></a>
+## 3.7 Le non-linearità e perché sono obbligatorie
+
+Il motore include `relu`, `tanh`, `exp`, `log`, `gelu`. Le prime servono come
+"funzioni di attivazione": le non-linearità che stanno tra uno strato e l'altro. Non
+sono un ornamento — sono **obbligatorie**, e vale la pena capire perché.
+
+> **📖 Concetto: senza non-linearità, la profondità è finta.** Comporre solo
+> operazioni lineari (matmul, somme) dà ancora una funzione lineare: dieci matmul in
+> fila equivalgono matematicamente a *una sola* matmul. Quindi una rete "profonda"
+> fatta di soli strati lineari avrebbe esattamente lo stesso potere espressivo di un
+> singolo strato: tutta la profondità sarebbe sprecata. Infilare una funzione **non
+> lineare** tra gli strati è ciò che permette alla rete di rappresentare funzioni
+> arbitrariamente complicate (è il "teorema di approssimazione universale"). La
+> non-linearità è il motivo per cui il deep learning è *deep*.
+
+Le implementiamo con backward espliciti, tranne `gelu` che costruiamo per
+**composizione** di operazioni già esistenti:
+
+```python
+def gelu(self):
+    c = math.sqrt(2.0/math.pi)
+    inner = (self + (self**3) * 0.044715) * c
+    return (self * 0.5) * (inner.tanh() + 1.0)
+```
+
+> **🔧 Nel codice: gelu non ha un backward proprio.** È scritta usando solo `+`, `*`,
+> `**`, `tanh` — operazioni che *già* sanno differenziarsi. Quindi il suo gradiente è
+> **automatico**, gestito dal grafo: è la prima dimostrazione concreta della potenza
+> dell'autograd. Scrivi il forward, e il backward viene gratis. (`gelu` è la
+> variante "morbida" di `relu` usata dai GPT reali; la useremo nel feed-forward del
+> transformer in Fase 6.)
+
+---
+
+<a name="sec-3-8"></a>
+## 3.8 cross_entropy fusa: stabilità ed eleganza
+
+La loss della Fase 1/2 è implementata come **una singola operazione** `cross_entropy`,
+non come `log(softmax(...))` composto. Due ragioni.
+
+- **Stabilità.** La composizione ingenua `log(softmax(z))` può produrre `log(0) = −∞`.
+  La forma "fusa" (log-sum-exp con la sottrazione del massimo, come il trucco della
+  [sezione 2.2](#sec-2-2)) è numericamente stabile per costruzione.
+- **Semplicità del gradiente.** Come scoperto in Fase 2, il gradiente della coppia
+  softmax+cross-entropy è la sottrazione semplice `(softmax − onehot) / B`, molto più
+  pulita dei due gradienti separati moltiplicati. Il nostro `cross_entropy._backward`
+  è letteralmente quelle poche righe.
+
+> **🔧 La Fase 2 era, retroattivamente, la derivazione di questa operazione.** Anche
+> PyTorch fonde softmax e cross-entropy (`F.cross_entropy`) per gli identici motivi.
+> Averla derivata a mano prima significa che ora sappiamo *esattamente* cosa c'è
+> dentro.
+
+---
+
+<a name="sec-3-9"></a>
+## 3.9 La prova: 18 gradient check e la precisione macchina
+
+Un motore di gradienti di cui non ci si fida è inutile — anzi, dannoso, perché
+avvelenerebbe *tutte* le fasi 4–8 in silenzio. Per questo la fase non è chiusa finché
+non passa una batteria di **18 gradient check**, uno per ogni operazione.
+
+Ogni test usa la tecnica della [sezione 2.7](#sec-2-7): calcola il gradiente col
+nostro backward (analitico) e lo confronta con la stima numerica (differenze finite,
+che usano *solo* il forward). Due strade indipendenti: se coincidono entro una
+tolleranza stretta (< 10⁻⁵), il backward è giusto. Copriamo tutto: somma con
+broadcast, prodotto con broadcast, divisione, potenza, matmul 2D **e a batch** (che
+servirà all'attention), riduzioni, tutte le non-linearità, softmax, cross-entropy, il
+caso del tensore riusato (accumulo), e una mini-MLP composita.
+
+E c'è una validazione ancora più bella. Abbiamo preso il bigram della Fase 2 e
+calcolato il suo gradiente in **due** modi: quello *manuale* (derivato a mano in Fase
+2) e quello *automatico* (lasciando fare a ronkgrad). Differenza massima:
+
+```
+max |dW_manuale − dW_autograd| = 2.08e-17
+```
+
+Cioè: **zero**, a meno dell'ultimo bit di precisione dei numeri in virgola mobile. Il
+motore che abbiamo scritto riproduce *esattamente* la matematica che avevamo fatto a
+mano. Ora possiamo fidarci ciecamente di `ronkgrad`.
+
+> **🔧 Il dividendo di produttività.** Da qui in avanti, scrivere un modello nuovo
+> richiederà **solo il forward**: il backward sarà gratis e già verificato. È lo
+> stesso salto di produttività che i framework hanno regalato alla ricerca — e ce lo
+> saremo guadagnato da soli, capendone ogni riga.
+
+---
+
+<a name="sec-3-10"></a>
+## 3.10 Glossario Fase 3 / cosa arriva in Fase 4
+
+Nuovi termini:
+
+- **Autograd (differenziazione automatica)**: calcolare i gradienti automaticamente
+  registrando le operazioni in un grafo e percorrendolo all'indietro.
+- **Grafo computazionale (DAG)**: la rete di tensori e operazioni costruita durante il
+  forward; diretto e aciclico.
+- **Tensore foglia**: un tensore che non nasce da altri (dati, pesi); il suo
+  `_backward` è un no-op.
+- **`_unbroadcast`**: riportare un gradiente alla forma originale sommando lungo le
+  dimensioni broadcastate.
+- **Accumulo dei gradienti (`+=`)**: sommare i contributi di ogni uso di un tensore.
+- **Ordinamento topologico**: un ordine dei nodi in cui ogni nodo viene dopo i suoi
+  genitori; garantisce che il backward riceva gradienti completi.
+- **Funzione di attivazione / non-linearità**: la funzione non lineare tra gli strati
+  (relu, tanh, gelu…), senza cui la profondità sarebbe inutile.
+
+**In Fase 4** useremo finalmente `ronkgrad` per costruire un modello vero: un **MLP**
+(rete a più strati) che guarda **più caratteri** di contesto invece di uno solo.
+Introdurremo due mattoni che i transformer usano ovunque — gli **embedding** (i
+caratteri diventano vettori densi, la "compressione della tabella impossibile"
+promessa in [Fase 1](#sec-1-1)) e gli **strati nascosti** — più l'ottimizzatore
+**AdamW**, quello con cui si addestrano i GPT veri. E per la prima volta vedremo la
+loss di validation *staccarsi* da quella di training: incontreremo l'overfitting dal
+vivo.
+
+---
+
+*Fine del capitolo Fase 3.*

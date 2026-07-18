@@ -837,7 +837,7 @@ al cuore di PyTorch. Capito questo, PyTorch non avrà più segreti strutturali.
 (Riferimento spirituale: micrograd di Karpathy, che però è scalare; il nostro è
 tensoriale, e la differenza — il broadcasting — è il vero contenuto della fase.)
 
-### ☐ 3.1 — L'idea: il grafo computazionale
+### ☑ 3.1 — L'idea: il grafo computazionale
 
 **Cosa**: classe `Tensor` che avvolge un `np.ndarray` (`.data`) e in più ricorda:
 `.grad` (l'accumulatore del gradiente), i tensori da cui è stato prodotto
@@ -868,7 +868,7 @@ un autograd. Corollario che ogni utente PyTorch conosce: prima di ogni backward,
 i gradienti vanno azzerati (`zero_grad`), altrimenti si sommano a quelli del passo
 precedente.
 
-### ☐ 3.2 — Le operazioni di base e i loro backward
+### ☑ 3.2 — Le operazioni di base e i loro backward
 
 **Cosa**: implementare, con forward e backward: `+`, `-`, `*` (elemento per
 elemento), `@` (matmul), `sum`, `mean`, e la meccanica del broadcasting.
@@ -903,7 +903,7 @@ backward, e la tortureremo nei test. Questo è il motivo per cui il nostro motor
 "tensoriale, non scalare": micrograd non ha questo problema perché non ha shape;
 noi sì, ed è il pezzo di comprensione in più che ci portiamo a casa.
 
-### ☐ 3.3 — Le non-linearità e le funzioni composte
+### ☑ 3.3 — Le non-linearità e le funzioni composte
 
 **Cosa**: `tanh`, `relu`, `gelu`, `exp`, `log`, e le composte di uso costante:
 `softmax` e `cross_entropy` come operazioni dedicate.
@@ -930,7 +930,7 @@ gradienti separati moltiplicati. Anche PyTorch la fonde
 (`F.cross_entropy`) per gli stessi identici motivi. La nostra Fase 2 è stata,
 retroattivamente, la derivazione di questa operazione.
 
-### ☐ 3.4 — `backward()`: l'ordinamento topologico
+### ☑ 3.4 — `backward()`: l'ordinamento topologico
 
 **Cosa**: il metodo `loss.backward()` che: (1) costruisce l'ordine topologico del
 grafo con una DFS; (2) inizializza `loss.grad = 1`; (3) chiama i `._backward` dei
@@ -944,7 +944,7 @@ ordine sbagliato, un nodo propagherebbe un gradiente parziale: risultati
 silenziosamente errati, di nuovo. **Perché `loss.grad = 1`**: la derivata della
 loss rispetto a sé stessa è 1 — è il seme da cui la catena parte.
 
-### ☐ 3.5 — La batteria di test (`test_autograd.py`)
+### ☑ 3.5 — La batteria di test (`test_autograd.py`)
 
 **Cosa**: per **ogni** operazione del motore, un gradient check numerico (Fase 2.6,
 ora sistematizzato in una utility riusabile), con casi mirati sul broadcasting

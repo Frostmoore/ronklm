@@ -5,8 +5,9 @@
 > aprire i file**. Se per sapere la firma di un metodo bisogna leggere il sorgente,
 > questo documento ha fallito.
 >
-> **Stato**: aggiornato a fine **Fase 2** (2026-07-18). Copre corpus, tokenizer,
-> dataset, bigram a conteggio e neurale, test. Piano in [`plan_ronklm_system.md`](plan_ronklm_system.md).
+> **Stato**: aggiornato a fine **Fase 3** (2026-07-18). Copre corpus, tokenizer,
+> dataset, bigram a conteggio e neurale, motore di autograd, test. Piano in
+> [`plan_ronklm_system.md`](plan_ronklm_system.md).
 >
 > **Verifica meccanica firme**: eseguita a fine Fase 0 con estrazione `def`/`class`
 > via grep e confronto con le tabelle qui sotto. ✅ Allineato.
@@ -24,6 +25,7 @@
 | Leggere un file di corpus | `load_text()` in [`ronklm/dataset.py`](../ronklm/dataset.py) |
 | Bigram per conteggio (Fase 1) | `BigramCount` in [`ronklm/models/bigram_count.py`](../ronklm/models/bigram_count.py) |
 | Bigram neurale (Fase 2) | `BigramNeural` in [`ronklm/models/bigram_neural.py`](../ronklm/models/bigram_neural.py) |
+| Autograd (`Tensor`, backward) | [`ronklm/autograd.py`](../ronklm/autograd.py) — `Tensor`, `cross_entropy` (Fase 3) |
 | Eseguire tutti i test | `python run_tests.py` (radice) |
 | Runner di test senza pytest | [`tests/_runner.py`](../tests/_runner.py) |
 | Versione del pacchetto | `__version__` in [`ronklm/__init__.py`](../ronklm/__init__.py) |
@@ -43,6 +45,7 @@ RonkLM/
 │   ├── __init__.py            # docstring pacchetto + __version__
 │   ├── tokenizer.py           # CharTokenizer
 │   ├── dataset.py             # load_text(), Dataset
+│   ├── autograd.py            # ronkgrad: Tensor + cross_entropy (Fase 3)
 │   └── models/
 │       ├── __init__.py
 │       ├── bigram_count.py    # BigramCount (Fase 1)
@@ -52,7 +55,8 @@ RonkLM/
 │   ├── test_tokenizer.py      # 8 test
 │   ├── test_dataset.py        # 8 test
 │   ├── test_bigram_count.py   # 6 test
-│   └── test_bigram_neural.py  # 5 test
+│   ├── test_bigram_neural.py  # 5 test
+│   └── test_autograd.py       # 18 gradient check
 ├── run_tests.py               # lancia tutti i tests/test_*.py
 ├── explain.md                 # libro di testo: spiegazione didattica per fase
 ├── requirements.txt           # numpy (+ matplotlib opz., torch dalla Fase 9)
@@ -61,10 +65,11 @@ RonkLM/
 └── .gitignore
 ```
 
-**NON esiste ancora** (per evitare ricerche a vuoto): nessun autograd
-(`ronklm/autograd.py`), nessun layer (`ronklm/nn.py`), nessun ottimizzatore
-(`ronklm/optim.py`), nessun modello neurale (bigram neurale, MLP, GPT). Arrivano
-dalle Fasi 2+. Esiste solo il modello a conteggio (Fase 1).
+**NON esiste ancora** (per evitare ricerche a vuoto): nessun layer riusabile
+(`ronklm/nn.py` con `Module`/`Linear`/`Embedding`/`LayerNorm`), nessun ottimizzatore
+(`ronklm/optim.py` con SGD/AdamW come classi), nessun MLP/attention/GPT. Arrivano
+dalle Fasi 4+. Esistono: bigram a conteggio (Fase 1), bigram neurale con gradiente a
+mano (Fase 2), motore di autograd `ronkgrad` (Fase 3).
 
 ---
 
@@ -188,7 +193,47 @@ Metodi:
 NLL train/val **2.373/2.385** (→ converge al bigram a conteggio); gradient check
 errore relativo < 1e-4.
 
-### 3.5 `data/prepare_corpus.py` — script di preparazione corpus
+### 3.5 `ronklm/autograd.py` — ronkgrad (motore di autograd)
+
+Mini-PyTorch tensoriale (Fase 3). Costruisce un grafo computazionale nel forward e ne
+percorre l'inverso nel backward. **Da qui in poi ogni modello si fida di questo file.**
+
+Funzione di modulo `_unbroadcast(grad, shape) -> np.ndarray`: riporta un gradiente
+alla forma originale sommando lungo le dimensioni broadcastate (il punto più insidioso).
+
+Classe `Tensor`. Attributi: `data: np.ndarray[float64]`, `grad: np.ndarray[float64]`,
+`_backward: callable`, `_prev: tuple[Tensor]`, `_op: str`; proprietà `shape`.
+
+| Metodo/operatore | Firma | Effetto (e formula del backward) |
+|---|---|---|
+| `__init__` | `(self, data, _prev=(), _op="") -> None` | wrappa un array, `grad` a zeri |
+| `zero_grad` | `(self) -> None` | azzera `grad` |
+| `__add__`/`__radd__` | `(self, other) -> Tensor` | somma; backward: distribuisce `out.grad` a entrambi |
+| `__neg__`/`__sub__`/`__rsub__` | `(self, other) -> Tensor` | negazione/sottrazione (via add+mul) |
+| `__mul__`/`__rmul__` | `(self, other) -> Tensor` | prodotto elem.; backward: `other*g` e `self*g` |
+| `__pow__` | `(self, p: float) -> Tensor` | potenza scalare; backward: `p*x^(p-1)*g` |
+| `__truediv__`/`__rtruediv__` | `(self, other) -> Tensor` | divisione (via `pow(-1)`) |
+| `__matmul__` | `(self, other) -> Tensor` | matmul (anche batch); backward: `g@Bᵀ`, `Aᵀ@g` |
+| `sum` | `(self, axis=None, keepdims=False) -> Tensor` | riduzione; backward: broadcast di `g` |
+| `mean` | `(self, axis=None, keepdims=False) -> Tensor` | media (= sum/n) |
+| `relu` | `(self) -> Tensor` | `max(0,x)`; backward: `(x>0)*g` |
+| `tanh` | `(self) -> Tensor` | backward: `(1-tanh²)*g` |
+| `exp` | `(self) -> Tensor` | backward: `exp(x)*g` |
+| `log` | `(self) -> Tensor` | backward: `(1/x)*g` |
+| `gelu` | `(self) -> Tensor` | GELU-tanh **composita** (backward automatico) |
+| `softmax` | `(self, axis=-1) -> Tensor` | backward: `s*(g - Σ(g*s))` |
+| `backward` | `(self) -> None` | topo-sort + `grad=1` alla radice + `_backward` in ordine inverso |
+
+Funzione di modulo:
+
+| Funzione | Firma | Effetto |
+|---|---|---|
+| `cross_entropy` | `(logits: Tensor, targets: np.ndarray) -> Tensor` | CE media fusa/stabile; backward: `(softmax − onehot)/B` |
+
+**Validazione**: 18 gradient check < 1e-5; riproduce il gradiente manuale della Fase 2
+a **2e-17** (precisione macchina).
+
+### 3.6 `data/prepare_corpus.py` — script di preparazione corpus
 
 Funzioni (tutte a livello di modulo; script eseguibile con `python data/prepare_corpus.py [--force]`):
 
@@ -247,7 +292,14 @@ argomenti di funzione con default:
 
 ## 6. Catalogo dei test
 
-Runner: `python run_tests.py` (nessun pytest richiesto). **33 test, tutti verdi.**
+Runner: `python run_tests.py` (nessun pytest richiesto). **51 test, tutti verdi.**
+
+`tests/test_autograd.py` (18): un gradient check per ogni operazione — `add`
+(broadcast), `sub`, `mul` (broadcast), `div`, `pow`, `matmul` 2D e batch, `sum`
+(axis), `mean`, `relu`, `tanh`, `exp`, `log`, `gelu`, `softmax`, `cross_entropy`,
+tensore riusato (accumulo), mini-MLP composita. Ognuno dimostra che il backward
+analitico coincide col numerico (differenze finite centrali) entro 1e-5.
+
 
 `tests/test_bigram_neural.py` (5):
 
