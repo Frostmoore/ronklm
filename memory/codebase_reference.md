@@ -25,6 +25,7 @@
 | Eseguire tutti i test | `python run_tests.py` (radice) |
 | Runner di test senza pytest | [`tests/_runner.py`](../tests/_runner.py) |
 | Versione del pacchetto | `__version__` in [`ronklm/__init__.py`](../ronklm/__init__.py) |
+| Spiegazione didattica profonda | [`explain.md`](../explain.md) (radice) — il "libro di testo" |
 
 ---
 
@@ -45,8 +46,10 @@ RonkLM/
 │   ├── test_tokenizer.py      # 8 test
 │   └── test_dataset.py        # 8 test
 ├── run_tests.py               # lancia tutti i tests/test_*.py
+├── explain.md                 # libro di testo: spiegazione didattica per fase
 ├── requirements.txt           # numpy (+ matplotlib opz., torch dalla Fase 9)
 ├── README.md
+├── .gitattributes             # forza LF ovunque (no \r nel vocab)
 └── .gitignore
 ```
 

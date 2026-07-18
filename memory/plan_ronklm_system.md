@@ -1819,10 +1819,30 @@ un'architettura di cui possediamo ogni derivata. Fine del Percorso B.
 
 Alla fine di **ogni** fase, senza attendere richiesta:
 1. Aggiornare **questo** piano: checkbox, note su deviazioni e decisioni prese.
-2. Aggiornare (creare, a fine Fase 1) `memory/codebase_reference.md`.
-3. Messaggio **estremamente dettagliato**: stato, checkbox di fase e sottofasi,
+2. Aggiornare `memory/codebase_reference.md` (atlante tecnico: firme, tabelle,
+   dove-sta-cosa).
+3. Generare/aggiornare `explain.md` alla radice (spiegazione didattica **profonda**,
+   dai primi principi, ben indicizzata: come funziona ogni cosa e *perché* è stata
+   scelta — vedi Parte IV.5).
+4. Messaggio **estremamente dettagliato**: stato, checkbox di fase e sottofasi,
    commento sullo stato generale e su quello della fase.
-4. Commit e push su branch versionato (`v1.0.0` → incrementi per entità).
+5. Commit e push su branch versionato (`v1.0.0` → incrementi per entità), **su
+   entrambi i remote** (`github` e `gitea`).
+
+## IV.5 I tre documenti del progetto (ruoli distinti)
+
+Per non duplicare e non confondere, ogni documento ha un ruolo netto:
+
+| Documento | Ruolo | Taglio |
+|---|---|---|
+| `memory/plan_ronklm_system.md` | **il piano**: cosa faremo, in che ordine, con quale *perché strategico* | roadmap a fasi, checkbox, decisioni |
+| `memory/codebase_reference.md` | **l'atlante**: dove sta cosa, firme, tabelle, trappole | riferimento tecnico secco |
+| `explain.md` (radice) | **il libro di testo**: come funziona ogni cosa dai primi principi | didattica profonda, esempi, analogie |
+
+`explain.md` è pensato per un lettore che parte da zero: spiega non solo *cosa* fa il
+codice ma *come funzionano* i concetti sottostanti (tokenizzazione, tensori, PRNG,
+entropia, gradienti…), con esempi sui numeri reali del nostro corpus. Cresce di una
+sezione a ogni fase e mantiene un indice navigabile.
 
 ## IV.3 Stato attuale
 
