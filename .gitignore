@@ -14,6 +14,9 @@ checkpoints/
 runs/
 *.log
 
+# Cache del download grezzo del corpus A (riproducibile via prepare_corpus.py)
+data/pinocchio_raw.txt
+
 # Corpus grande (Percorso B) — riproducibile via script, non versionato
 data/corpus_b/
 data/*.bin

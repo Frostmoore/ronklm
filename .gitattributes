@@ -1,0 +1,14 @@
+# Forziamo fine-riga LF ovunque, su ogni piattaforma.
+#
+# PERCHE': data/input.txt DEVE restare a LF puro. Se git lo convertisse a CRLF in
+# checkout (autocrlf), il carattere \r rientrerebbe nel corpus e nel vocabolario
+# (69 -> 70+), riaprendo una trappola gia' disinnescata in prepare_corpus.py.
+# Estendiamo la regola a tutto il codice per coerenza e determinismo dei test.
+
+* text=auto eol=lf
+
+# Il corpus e la cache: testo, sempre LF, mai conversione.
+data/input.txt text eol=lf
+*.py text eol=lf
+*.md text eol=lf
+*.txt text eol=lf

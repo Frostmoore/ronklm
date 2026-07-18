@@ -394,13 +394,18 @@ Formato di ogni fase: **obiettivo didattico** → per ogni sottofase: *cosa* fac
 
 ---
 
-## ☐ Fase 0 — Fondamenta: dati e tokenizer
+## ☑ Fase 0 — Fondamenta: dati e tokenizer  ✅ COMPLETATA (2026-07-18)
 
 **Obiettivo didattico.** Prima di qualsiasi modello, interiorizzare la catena
 `testo → numeri → tensori → batch`. Ogni LLM del mondo, GPT-4 incluso, inizia
 esattamente così; le differenze sono solo di scala.
 
-### ☐ 0.1 — Scaffolding del progetto
+> **Esito**: pipeline completa e testata (16/16 test verdi). Corpus Pinocchio
+> pulito: **240.920 caratteri, vocabolario di 69 simboli**. Dataset: train
+> 216.828 / val 24.092. Il `codebase_reference.md` è stato creato già ora (una
+> fase in anticipo rispetto al piano) perché c'era codice sostanziale da mappare.
+
+### ☑ 0.1 — Scaffolding del progetto
 
 **Cosa**: `git init`, branch `v1.0.0`, `requirements.txt` (solo `numpy`),
 `ronklm/__init__.py`, `README.md` minimale, `.gitignore` (cache Python, checkpoint).
@@ -414,7 +419,10 @@ branch versionati, e perché nei progetti dove "si sbaglia per imparare" la
 possibilità di tornare indietro a uno stato funzionante è una rete di sicurezza
 didattica, non solo tecnica.
 
-### ☐ 0.2 — Il corpus: `data/input.txt` + `prepare_corpus.py`
+> ✅ Fatto: `git init` su branch `v1.0.0`, remote `github`+`gitea`,
+> `requirements.txt`, `ronklm/__init__.py`, `README.md`, `.gitignore`.
+
+### ☑ 0.2 — Il corpus: `data/input.txt` + `prepare_corpus.py`
 
 **Cosa**: script che scarica Pinocchio da fonte di pubblico dominio, rimuove
 header/footer editoriali, normalizza i caratteri problematici, salva
@@ -440,7 +448,15 @@ e **teniamo gli a-capo** (imparerà i paragrafi).
 **Verifica**: il vocabolario risultante deve stare sotto ~120 simboli e non
 contenere caratteri "sorpresa" (li elenchiamo tutti a occhio nell'output dello script).
 
-### ☐ 0.3 — `CharTokenizer` (`tokenizer.py`)
+> ✅ Fatto. Fonte: **Gutenberg ebook #52484** (testo integrale; il #19517 era una
+> lettura audio, scartato). Confini isolati con ancore testuali (`STORY_START`,
+> `STORY_END`) invece di offset numerici. Rimossi 2 artefatti Gutenberg scoperti
+> all'ispezione: **`[Illustrazione: …]`** (79 didascalie editoriali) e **`_…_`**
+> (76 marcatori di corsivo). Trappola disinnescata: doppia traduzione dei
+> fine-riga su Windows in cache → risolta scrivendo/leggendo in binario. Cifre
+> `1 4 8` tenute (testo genuino: "avevano 14 anni"). Vocab finale: **69**.
+
+### ☑ 0.3 — `CharTokenizer` (`tokenizer.py`)
 
 **Cosa**: classe con vocabolario costruito dai caratteri unici del corpus (ordinati,
 per determinismo), due mappe `stoi` (string→int) e `itos` (int→string), metodi
@@ -458,7 +474,10 @@ successive ci passa attraverso, quindi la testiamo subito e non la tocchiamo pi�
 **Verifica** (`test_tokenizer.py`): round-trip `decode(encode(s)) == s` su tutto il
 corpus; `vocab_size` stabile tra esecuzioni; errore su carattere ignoto.
 
-### ☐ 0.4 — Dataset e batching (`dataset.py`)
+> ✅ Fatto. Aggiunti anche `save()`/`load()` (JSON) in anticipo: serviranno al
+> checkpoint di Fase 7. 8 test verdi.
+
+### ☑ 0.4 — Dataset e batching (`dataset.py`)
 
 **Cosa**: caricare il corpus, codificarlo *una volta sola* in un array NumPy di
 interi, spezzarlo in train (90%) e validation (10%), e scrivere
@@ -505,8 +524,13 @@ oscillerebbero seguendo la trama invece della lingua.
 **Verifica** (`test_dataset.py`): shape corrette; proprietà `Y[i] == X[i+1]`
 sull'array sorgente; train e val non si sovrappongono.
 
+> ✅ **0.5 test** — Fatto. Niente pytest nell'ambiente → runner minimale
+> (`tests/_runner.py` + `run_tests.py`). **16 test totali, tutti verdi.**
+> Invariante di shift verificata come `X[:, 1:] == Y[:, :-1]`.
+
 **Deliverable di fase**: possiamo trasformare Pinocchio in batch di tensori interi
 pronti per qualsiasi modello. Nessun modello esiste ancora — ed è giusto così.
+✅ **Raggiunto e verificato end-to-end.**
 
 ---
 
@@ -1805,9 +1829,11 @@ Alla fine di **ogni** fase, senza attendere richiesta:
 - ☑ **Kickoff**: cartella `memory/` creata; piano v1 redatto; piano v2
   (riscrittura approfondita) e piano v2.1 (aggiunto Percorso B fino a 50M)
   completati il 2026-07-18.
-- ☐ **Fase 0 — Fondamenta** *(prossima)*: git init, corpus Pinocchio, tokenizer,
-  dataset. Nessuna riga di codice esiste ancora.
-- ☐ Fasi 1–8 (Percorso A, NumPy, ~1M) — non iniziate.
+- ☑ **Fase 0 — Fondamenta** ✅ (2026-07-18): git+remote, corpus Pinocchio pulito
+  (240.920 char, vocab 69), `CharTokenizer`, `Dataset`+batching, 16 test verdi.
+  `codebase_reference.md` creato. Branch di rilascio: `v1.1.0`.
+- ☐ **Fase 1 — Bigram per conteggio** *(prossima)*.
+- ☐ Fasi 2–8 (Percorso A, NumPy, ~1M) — non iniziate.
 - ☐ Fasi 9–12 (Percorso B, PyTorch, 50M) — non iniziate; **sbloccate solo a
   Percorso A completato** (il Percorso A è la suite di test del Percorso B).
 
