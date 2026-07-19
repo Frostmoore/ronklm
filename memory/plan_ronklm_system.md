@@ -1,26 +1,33 @@
 # Piano di sistema — RonkLM
 
-> **Versione del piano**: 2.1 (aggiunto Percorso B: scalata a 50M parametri, 2026-07-18)
-> **Stato**: piano approvato in attesa di inizio Fase 0.
+> **Versione del piano**: 2.2 (target Percorso B alzato a ~150M; corpus Wikipedia IT +
+> Gutenberg via Kiwix; aggiunto Percorso C per il chatbot via SFT — 2026-07-19)
+> **Stato**: Percorso A COMPLETO (v2.1.0). Percorso B da iniziare (Fase 9).
 >
-> **Obiettivo del progetto**, in due percorsi:
+> **Obiettivo del progetto**, in tre percorsi:
 >
 > - **Percorso A (Fasi 0–8) — capire**: costruire da zero, in **Python + NumPy
 >   puro** (nessun framework di deep learning, nessun autograd nascosto), un
 >   piccolo GPT char-level (~1M parametri) addestrato su **testo italiano**, con
 >   lo scopo esplicito di **capire ogni singola lettera del codice**:
 >   tokenizzazione, embedding, loss, backpropagation, self-attention, blocchi
->   transformer e generazione di testo.
+>   transformer e generazione di testo. **✅ COMPLETO** (RonkLM v1, NLL val 1.632).
 > - **Percorso B (Fasi 9–12) — scalare**: una volta capito tutto, portare RonkLM
->   a **~50M di parametri** — port a PyTorch *dimostrato numericamente
+>   a **~150M di parametri** — port a PyTorch *dimostrato numericamente
 >   equivalente* al nostro motore, tokenizer **BPE scritto a mano**, corpus
->   italiano da **gigabyte**, training su GPU — fino a un modellino che genera
->   **italiano sensato a livello di frase e paragrafo** (non GPT-5.6: prosa
->   coerente, grammatica solida, niente fatti né istruzioni — aspettative
->   dettagliate in Fase 12).
+>   italiano da **gigabyte** (Wikipedia IT + Project Gutenberg italiano, via
+>   Kiwix), training su **GPU RTX 4080 Super** — fino a un modello base che genera
+>   **italiano fluente e grammaticalmente corretto, con senso locale** (non GPT-5.6:
+>   prosa plausibile che però divaga e inventa; niente fatti né istruzioni —
+>   aspettative dettagliate in Fase 12).
+> - **Percorso C (Fasi 13–14) — istruire**: trasformare il modello *base* in un
+>   **chatbot giocattolo** via fine-tuning supervisionato (SFT) su dataset di
+>   istruzioni italiani già esistenti, ed eventualmente allineamento (DPO). Toy
+>   assistant: tiene il formato della chat, non è affidabile né sa ragionare
+>   (aspettative dettagliate in Fase 13).
 >
-> Il Percorso B esiste *perché* esiste il Percorso A: scalare una cosa che non si
-> è capita è il modo migliore per non capirla mai più.
+> I percorsi B e C esistono *perché* esiste il Percorso A: scalare/istruire una cosa
+> che non si è capita è il modo migliore per non capirla mai più.
 >
 > **Contratto didattico**: il lettore di questo documento parte da zero sul deep
 > learning. Ogni scelta implementativa è quindi accompagnata dal suo *perché*, ogni
@@ -50,11 +57,14 @@
   - Fase 6 — Il blocco Transformer
   - Fase 7 — RonkLM: il GPT completo
   - Fase 8 — Training serio, esperimenti e CLI
-- [Parte III-B — Percorso B: la scalata a 50M](#parte-iii-b)
+- [Parte III-B — Percorso B: la scalata a ~150M](#parte-iii-b)
   - Fase 9 — Port a PyTorch con equivalenza dimostrata
   - Fase 10 — Tokenizer BPE scritto a mano
-  - Fase 11 — Il corpus grande
-  - Fase 12 — RonkLM-50M: architettura, training run, valutazione
+  - Fase 11 — Il corpus grande (Wikipedia IT + Gutenberg)
+  - Fase 12 — RonkLM-150M: architettura, training run, valutazione
+- [Parte III-C — Percorso C: il chatbot via SFT](#parte-iii-c)
+  - Fase 13 — SFT: da modello base ad assistente
+  - Fase 14 — (opzionale) Allineamento DPO e valutazione
 - [Parte IV — Milestone, rituale di fine fase, stato](#parte-iv)
 
 ---
@@ -143,16 +153,16 @@ con le tue mani (o letto riga per riga, avendone la derivazione su carta):
 l'autograd È il cuore della questione. Un LLM si addestra per discesa del
 gradiente; se il gradiente è una scatola nera, il training è una scatola nera.
 
-**E allora i 50M di parametri? — i conti, fatti onestamente.** Addestrare un
+**E allora i ~150M di parametri? — i conti, fatti onestamente.** Addestrare un
 transformer costa ≈ `6 × parametri × token` operazioni in virgola mobile (regola
-empirica standard: 2 per il forward, 4 per il backward). Per 50M di parametri su
-~1 miliardo di token: ~3×10¹⁷ FLOP. Una CPU consumer in NumPy sostiene realmente
-~10–50 GFLOP/s su questi carichi → **mesi o anni di calcolo ininterrotto**. Una
-GPU consumer moderna (che PyTorch sa usare) sostiene decine di TFLOP/s in mixed
-precision → **giorni**. Non è una questione di ottimizzazione del nostro codice:
+empirica standard: 2 per il forward, 4 per il backward). Per ~150M di parametri su
+~3 miliardi di token (token-updates): ~2,7×10¹⁸ FLOP. Una CPU consumer in NumPy
+sostiene realmente ~10–50 GFLOP/s su questi carichi → **anni di calcolo
+ininterrotto**. La **RTX 4080 Super** (che PyTorch sa usare) sostiene ~10² TFLOP/s in
+mixed precision → **ore**. Non è una questione di ottimizzazione del nostro codice:
 è un muro di 3–4 ordini di grandezza tra CPU-NumPy e GPU-PyTorch. Da qui la
-struttura a due percorsi: **il NumPy puro serve a capire (Percorso A, ~1M
-parametri, dove il CPU basta); PyTorch serve a scalare (Percorso B, 50M)** — e
+struttura a più percorsi: **il NumPy puro serve a capire (Percorso A, ~1M
+parametri, dove il CPU basta); PyTorch serve a scalare (Percorso B, ~150M)** — e
 arriva *solo dopo*, in Fase 9, quando ogni sua API corrisponderà a codice che
 abbiamo già scritto e testato noi. Il port includerà un test di equivalenza
 numerica (9.2): stesso input, stessi pesi → stessi logits nei due motori. È il
@@ -310,16 +320,17 @@ Termini usati in tutto il documento. Torna qui ogni volta che serve.
 | Linguaggio | Python 3.10+ |
 | Dipendenze runtime (Percorso A) | `numpy` (l'unica). `matplotlib` opzionale, solo per grafici di loss. |
 | Anti-dipendenze (Percorso A) | **Vietati** PyTorch, TensorFlow, JAX, scikit-learn, HuggingFace. |
-| Dipendenze (Percorso B) | `torch` (dalla Fase 9, dopo il test di equivalenza col nostro motore) |
+| Dipendenze (Percorso B/C) | `torch` (dalla Fase 9); estrazione ZIM (`libzim`/`zimdump`) per il corpus |
 | Modello Percorso A | Transformer decoder-only, char-level, ~0.5–1.5M parametri |
-| Modello Percorso B | Transformer decoder-only, BPE ~16k, **~50M parametri** |
+| Modello Percorso B | Transformer decoder-only, BPE ~24–32k, **~150M parametri** (target primario) |
 | Corpus Percorso A | *Pinocchio* (Collodi), pubblico dominio — decisione finale in 0.2 |
-| Corpus Percorso B | italiano, ordine dei GB (Wikipedia IT + libri PD + web pulito) — Fase 11 |
+| Corpus Percorso B | **italiano**: Wikipedia IT + Project Gutenberg italiano, via **Kiwix (file ZIM)**; ~1.2–1.5 mld token, 2–3 epoche — Fase 11 |
+| Modello/dati Percorso C | SFT su dataset di istruzioni italiani esistenti (Alpaca-it, Dolly-it, OASST-it…) — Fase 13 |
 | Documento atlante | `memory/codebase_reference.md` (creato a fine Fase 1) |
 | Versionamento | branch `v1.0.0` in avanti, incrementi per entità della modifica |
 | Remote git | `github` → `https://github.com/Frostmoore/ronklm.git` · `gitea` → `https://git.home.varitest.ovh/smp-webmaster/ronklm.git` — **ogni push va su entrambi** |
 | Hardware Percorso A | CPU qualsiasi; nessuna GPU richiesta |
-| Hardware Percorso B | GPU necessaria per la Fase 12 (propria o noleggiata — decisione aperta, IV.4) |
+| Hardware Percorso B/C | **RTX 4080 Super (16 GB)** — decisione presa. Budget di training accettato: **7–8 ore** per run. Nessun cloud necessario. |
 
 ## II.2 Regole non negoziabili del progetto
 
@@ -1558,21 +1569,34 @@ documentati e documentazione completa. **Fine del Percorso A.**
 ---
 
 <a name="parte-iii-b"></a>
-# Parte III-B — Percorso B: la scalata a 50M
+# Parte III-B — Percorso B: la scalata a ~150M
 
-**La promessa di questo percorso**: un RonkLM da ~50M di parametri che scrive
-**italiano sensato a livello di frase e paragrafo**. E il suo prerequisito
-assoluto: il Percorso A completato — ogni fase di questo percorso *riusa come
-verità di riferimento* qualcosa costruito nel Percorso A (il motore per il test di
-equivalenza, la pipeline dati come modello mentale, la tabella NLL come metro).
+**La promessa di questo percorso**: un RonkLM da ~150M di parametri che scrive
+**italiano fluente e grammaticalmente corretto, con senso a livello di frase e
+breve paragrafo**. E il suo prerequisito assoluto: il Percorso A completato — ogni
+fase di questo percorso *riusa come verità di riferimento* qualcosa costruito nel
+Percorso A (il motore per il test di equivalenza, la pipeline dati come modello
+mentale, la tabella NLL come metro).
 
-**Perché 50M è il numero giusto per "sensato ma addestrabile da una persona"**:
-è la scala di GPT-2 small diviso 2 (124M) e di progetti come TinyStories, che
-hanno dimostrato che decine di milioni di parametri **bastano per grammatica
-solida e coerenza locale** se i dati sono buoni; ed è ancora dentro i limiti di
-una singola GPU consumer (il modello in mixed precision + AdamW + attivazioni sta
-in ~8–12 GB di VRAM con batch accumulato). 10× più piccolo non sarebbe mai
-"sensato"; 10× più grande non sarebbe più un progetto personale.
+**Perché ~150M e non 50M (e perché NON di più) — il ragionamento compute-optimal.**
+La scelta della dimensione non la detta la VRAM (la RTX 4080 Super da 16 GB reggerebbe
+anche 300–500M), ma **due vincoli reali**: il budget di tempo (~7–8 ore per run) e la
+quantità di dati italiani puliti disponibili (~1,2–1,5 mld token, Fase 11). Le leggi di
+scala (Chinchilla) legano dimensione ottimale, dati e calcolo. Con ~8 ore su una singola
+4080 Super (~10¹⁸ FLOP nell'ordine) e ~1,5 mld token, il punto compute-optimal cade
+attorno a **100–150M**: sotto, la GPU resta "sottoutilizzata" rispetto ai dati; sopra
+(es. 300M), a parità di tempo il modello resta **sotto-addestrato** — cioè *peggiore*,
+non migliore. Quindi 150M non è un compromesso al ribasso: è vicino all'ottimo per il
+nostro budget, e lascia la porta aperta al chatbot (Percorso C). Per andare
+significativamente oltre servirebbero *più dati* (altre lingue o web crawl) e *più
+tempo*, non più VRAM. Riferimenti: GPT-2 small è 124M; i chatbot "veri" più piccoli
+(SmolLM2-135M/360M, Qwen2.5-0.5B) vivono proprio in questa fascia.
+
+**Aspettative oneste (dettaglio in Fase 12).** A 150M su ~1,5 mld token di italiano:
+grammatica solida, parole vere (il BPE elimina le "quasi-parole" del Percorso A), senso
+frase-per-frase e su brevi paragrafi. MA: divaga sui testi lunghi, inventa fatti con
+sicurezza, e **non segue istruzioni** — è un modello di *completamento*. Il
+comportamento da assistente si costruisce nel Percorso C.
 
 ---
 
@@ -1619,15 +1643,16 @@ permettercelo — da qui in poi il riferimento sarà RonkLM-torch stesso.
 
 ### ☐ 9.3 — Benchmark e primi assaggi di GPU
 
-**Cosa**: misurare token/secondo di training: NumPy-CPU vs torch-CPU vs torch-GPU
-(se disponibile), sulla config della Fase 7; documentare i fattori di speedup
+**Cosa**: misurare token/secondo di training: NumPy-CPU vs torch-CPU vs **torch-GPU
+sulla RTX 4080 Super**, sulla config della Fase 7; documentare i fattori di speedup
 reali. Introdurre `device`, `torch.compile` e la mixed precision (bf16/fp16) con
 una spiegazione di cosa sono e perché la GPU li rende possibili.
 
 **Perché misurare invece di citare**: i "3–4 ordini di grandezza" promessi in I.2
-diventano un numero *nostro*, misurato sul *nostro* modello. E il benchmark decide
-la questione hardware della Fase 12 con dati alla mano (quanti giorni per N
-miliardi di token sulla GPU X). **Mixed precision, il perché in breve**: le GPU
+diventano un numero *nostro*, misurato sul *nostro* modello sulla *nostra* GPU. E il
+benchmark **dimensiona la Fase 12 con dati alla mano**: dato il target ~7–8 ore, quanti
+token/s regge la 4080 Super → quanti token totali possiamo processare → quale coppia
+(dimensione modello, epoche) è compute-optimal. **Mixed precision, il perché in breve**: le GPU
 moderne hanno unità dedicate (tensor core) che macinano fp16/bf16 a velocità
 multiple del fp32; i pesi master restano in fp32 per non accumulare errori di
 arrotondamento negli update piccoli. Dettagli operativi al momento dell'uso.
@@ -1648,7 +1673,7 @@ adesso serve davvero, e lo costruiamo da zero come tutto il resto (`ronklm/bpe.p
 
 **Cosa**: sezione scritta + esperimento di conteggio sul corpus.
 
-**Il perché, quantitativo.** Tre costi del char-level che a 50M diventano
+**Il perché, quantitativo.** Tre costi del char-level che a ~150M diventano
 proibitivi: (1) *contesto effettivo* — 512 posizioni char-level ≈ 80 parole
 italiane: troppo poche per la coerenza di un paragrafo; con BPE (~3.5–4 caratteri
 per token in italiano) le stesse 512 posizioni ≈ 300+ parole; e siccome
@@ -1714,30 +1739,37 @@ pre-tokenizzati e streammabili".
 
 **Il perché, coi numeri.** La ricerca sulle leggi di scala (Chinchilla, 2022) ha
 misurato che a parità di budget di calcolo il rapporto ottimale è **~20 token di
-training per parametro**: per 50M parametri, ~**1 miliardo di token** (≈ 4 GB di
-testo italiano). Sotto quella soglia il modello è sotto-nutrito (i parametri in
-più non rendono); si può andare *oltre* (over-training: più token per parametro)
-e per noi è anzi desiderabile, perché il nostro vincolo è la dimensione del
-modello, non il calcolo. Target pragmatico: **1–2 miliardi di token**. Fonti
-candidate, in ordine di qualità: Wikipedia italiana (~1.2 GB di testo, ~350–400M
-token: pulita, enciclopedica), libri italiani di pubblico dominio da
-LiberLiber/Gutenberg (~centinaia di MB: prosa di qualità), un sottoinsieme
-italiano di un corpus web curato (CulturaX/OSCAR: volume, ma da filtrare con
-cura). La scelta finale della miscela è una decisione registrata di questa fase.
-**Nota strategica sull'alternativa TinyStories**: è dimostrato che un corpus
-*sintetico, semplice e curato* (storie brevi con lessico controllato) produce
-coerenza percepita molto superiore a parità di parametri; la strada "RonkLM
-narratore di storie semplici" resta documentata come piano B se la miscela
-naturale desse risultati deludenti — con il trade-off dichiarato: più coerenza,
-meno copertura della lingua reale.
+training per parametro**: per **150M parametri**, ~**3 miliardi di token** sarebbero
+l'ottimo teorico. Noi ne avremo ~**1,2–1,5 mld** *unici* di italiano (vedi fonti), che
+copriamo con **2–3 epoche** (ripetere i dati fino a ~4 volte è noto essere quasi
+gratuito, Muennighoff 2023): così raggiungiamo di fatto il regime Chinchilla senza
+bisogno di più testo. **Le fonti, decise:**
+- **Wikipedia italiana** — via **Kiwix** (file ZIM `wikipedia_it_all_*`): ~1,9M
+  articoli, ~1 mld token dopo estrazione e pulizia. La spina dorsale, pulita ed
+  enciclopedica.
+- **Project Gutenberg italiano** — via **Kiwix** (ZIM Gutenberg): la *sola porzione
+  italiana* (~centinaia di libri PD, ~100–300M token). Prosa di qualità che bilancia il
+  registro enciclopedico di Wikipedia.
 
-### ☐ 11.2 — La pipeline: pulizia e deduplicazione
+> **⚠️ Decisione tecnica da non sbagliare (11.1):** Project Gutenberg è **in
+> stragrande maggioranza inglese**. Prendere "tutto Gutenberg" renderebbe RonkLM un
+> modello *prevalentemente inglese*. Vogliamo un modello **italiano**, quindi filtriamo
+> per lingua e teniamo **solo i testi italiani** di Gutenberg. (Se un domani volessimo
+> un modello bilingue, sarebbe una scelta diversa e consapevole, non un incidente.)
 
-**Cosa**: `data/corpus_b/`: script di download riproducibili (come 0.2, in
-grande); estrazione testo (per Wikipedia: da dump ufficiale, via estrattore
-standard); filtri di qualità (lunghezza minima, proporzione di caratteri
-alfabetici, rimozione boilerplate); **deduplicazione** a livello di documento
-(hash) e quasi-duplicati; normalizzazione coerente con 0.2.
+**Nota strategica sull'alternativa TinyStories**: resta documentata come piano B se la
+miscela naturale desse risultati deludenti — un corpus semplice/curato dà più coerenza
+percepita a parità di parametri, al costo di meno copertura della lingua reale.
+
+### ☐ 11.2 — La pipeline: estrazione da ZIM, pulizia, deduplicazione
+
+**Cosa**: `data/corpus_b/`: script di download/estrazione riproducibili (come 0.2, in
+grande). **Estrazione dai file ZIM di Kiwix** (via `libzim`/`zimdump`): scorrere gli
+articoli, buttare via markup/HTML residuo, tenere il testo. **Filtro di lingua**
+(tenere solo l'italiano, cruciale per Gutenberg). Filtri di qualità (lunghezza minima,
+proporzione di caratteri alfabetici, rimozione boilerplate/template Wikipedia);
+**deduplicazione** a livello di documento (hash) e quasi-duplicati; normalizzazione
+coerente con 0.2.
 
 **Perché la deduplicazione è il filtro più importante**: il web è pieno di testo
 ripetuto (mirror, citazioni, template). I duplicati (a) fanno *memorizzare* il
@@ -1751,7 +1783,7 @@ split contiguo di 0.4, un'ottava sopra).
 ### ☐ 11.3 — Pre-tokenizzazione e storage binario
 
 **Cosa**: tokenizzare *una volta* l'intero corpus col BPE della Fase 10; salvare
-gli id in file binari (`uint16` — basta, con vocab 16k < 65.536) in shard;
+gli id in file binari (`uint16` — basta, con vocab ~24–32k < 65.536) in shard;
 caricamento in training via `np.memmap`; `get_batch` che estrae finestre casuali
 dagli shard (la 0.4, ri-implementata per dati che non stanno in RAM).
 
@@ -1763,90 +1795,145 @@ disco: con `memmap` il sistema operativo pagina in RAM solo le finestre lette,
 quindi il training parte in un secondo e usa memoria costante. È esattamente lo
 schema di nanoGPT, e ora abbiamo tutto il background per capirne ogni scelta.
 
-**Deliverable di fase**: 1–2 miliardi di token italiani puliti, deduplicati,
-binarizzati, streammabili. La "tabella impossibile" della Fase 1.1 ha finalmente
-il suo avversario alla giusta scala.
+**Deliverable di fase**: ~1,2–1,5 miliardi di token italiani (Wikipedia IT + Gutenberg
+italiano) puliti, deduplicati, binarizzati, streammabili. La "tabella impossibile"
+della Fase 1.1 ha finalmente il suo avversario alla giusta scala.
 
 ---
 
-## ☐ Fase 12 — RonkLM-50M: architettura, training run, valutazione
+## ☐ Fase 12 — RonkLM-150M: architettura, training run, valutazione
 
-**Obiettivo didattico e traguardo del progetto.** Dimensionare, addestrare e
-valutare il modello da 50M. Qui si raccoglie tutto: l'architettura della Fase 7,
+**Obiettivo didattico e traguardo del Percorso B.** Dimensionare, addestrare e
+valutare il modello base da ~150M. Qui si raccoglie tutto: l'architettura della Fase 7,
 il motore della Fase 9, i token della Fase 10, i dati della Fase 11.
 
 ### ☐ 12.1 — Dimensionamento, con l'aritmetica esplicita
 
 **Cosa**: config di riferimento (da raffinare col benchmark 9.3):
-`n_layer=8, n_head=8, n_embd=512, block_size=512, vocab=16k`. Conti nel
-reference, riga per riga:
+`n_layer=12, n_head=12, n_embd=768, block_size=512, vocab≈32k` — la stessa forma di
+GPT-2 small. Conti nel reference, riga per riga:
 
 ```
-Embedding token:      16.384 × 512                  ≈  8,4M
-Embedding posizioni:  512 × 512                     ≈  0,3M
-Per blocco:  attn (4 × 512²) + ffn (8 × 512²)       ≈  3,1M
-8 blocchi:                                          ≈ 25,2M
-Testa finale:         512 × 16.384                  ≈  8,4M
-                                          totale    ≈ 42–50M (secondo varianti)
+Embedding token:      32.000 × 768                  ≈ 24,6M   (condiviso con la testa: weight tying)
+Embedding posizioni:  512 × 768                     ≈  0,4M
+Per blocco:  attn (4 × 768²) + ffn (8 × 768²)       ≈  7,1M
+12 blocchi:                                         ≈ 85,0M
+Testa finale:         768 × 32.000                  ≈ 24,6M   (= embedding token, weight tying)
+                                          totale    ≈ 134M   (→ ~150M con 14 layer)
 ```
 
-**Perché mostrare l'aritmetica**: per rendere tangibile *dove abitano* i
-parametri — sorpresa istruttiva: a questa scala **un terzo del modello sta negli
-embedding e nella testa**, ed è il motivo per cui esiste il **weight tying**
-(usare la *stessa* matrice per embedding di ingresso e testa di uscita: i due
-oggetti mappano lo stesso vocabolario nello stesso spazio semantico, in direzioni
-opposte — condividerli risparmia ~8M di parametri e in pratica *migliora* la
-loss). Rimandato apposta fin qui: è la prima scala a cui il beneficio si vede.
-Decisione registrata in questa sottofase dopo un confronto A/B piccolo.
+**Perché mostrare l'aritmetica**: per rendere tangibile *dove abitano* i parametri —
+sorpresa istruttiva: a questa scala **~1/3 del modello sta negli embedding e nella
+testa**, ed è il motivo per cui usiamo il **weight tying** (la *stessa* matrice per
+embedding di ingresso e testa di uscita: mappano lo stesso vocabolario nello stesso
+spazio, in direzioni opposte — condividerli risparmia ~25M di parametri e in pratica
+*migliora* la loss). **Perché ~150M e non di più** (già in Parte III-B): non è la VRAM
+il limite (la 4080 Super regge molto oltre), ma il budget compute-optimal di ~8 ore ×
+~1,5 mld token → l'ottimo cade a 100–150M; salire renderebbe il modello
+*sotto-addestrato*. La coppia esatta (dimensione, epoche) si fissa qui coi numeri del
+benchmark 9.3.
 
 ### ☐ 12.2 — Il training run
 
-**Cosa**: training completo con la CLI (estesa da 8.1): mixed precision,
-**gradient accumulation**, warmup+cosine (8.3), gradient clipping, checkpoint
-periodici e ripresa robusta (un run di giorni *verrà* interrotto), log su CSV +
-grafici. Prima un **run pilota** su ~1/10 dei dati e un modello ~10M per validare
-pipeline e stime di tempo, *poi* il run vero.
+**Cosa**: training completo con la CLI (estesa da 8.1) sulla **RTX 4080 Super**: mixed
+precision (bf16), **gradient accumulation**, warmup+cosine (8.3), gradient clipping,
+checkpoint periodici e **ripresa robusta** (un run di ~7–8 ore *può* interrompersi),
+log su CSV + grafici. Prima un **run pilota** (~1/10 dei dati, modello ~20M) per
+validare pipeline e stime di tempo, *poi* il run vero.
 
-**Perché le tecniche nuove, una per una**: *gradient accumulation* — il batch
-"giusto" a questa scala (~0.5M token per update, standard GPT-2) non entra in
-VRAM; si sommano i gradienti di K micro-batch prima di ogni update: matematicamente
-identico a un batch K volte più grande (il backward della somma, ancora lui),
-VRAM costante. *Gradient clipping* — su miliardi di batch qualcuno produce un
-gradiente anomalo (documento strano, coincidenza numerica); un singolo passo
-gigante può buttare il modello in una zona da cui non si riprende (loss spike);
-il clipping taglia la *norma* del gradiente a una soglia: assicurazione a costo
-zero. *Run pilota prima del run vero* — un errore scoperto al giorno 3 di un run
-da 5 giorni costa 3 giorni; lo stesso errore nel pilota costa un'ora. È il
-gradient check della gestione di progetto.
+**Perché le tecniche nuove, una per una**: *gradient accumulation* — il batch "giusto"
+a questa scala (~0,5M token per update, standard GPT-2) non entra nei 16 GB; si sommano
+i gradienti di K micro-batch prima di ogni update: matematicamente identico a un batch
+K volte più grande (il backward della somma, ancora lui), VRAM costante. *Gradient
+clipping* — su tanti batch qualcuno produce un gradiente anomalo; un passo gigante può
+buttare il modello in una zona da cui non si riprende (loss spike); il clipping taglia
+la *norma* a una soglia: assicurazione a costo zero. *Run pilota prima del vero* — un
+errore scoperto all'ora 6 di un run da 8 ore costa 6 ore; nel pilota costa 10 minuti.
 
-**Hardware, decisione da chiudere qui**: GPU propria (≥12 GB VRAM: run di giorni)
-oppure noleggio cloud (una consumer-class in cloud costa ~0.3–0.5 €/h: un run
-completo nell'ordine delle decine di euro). Il benchmark 9.3 fornisce i numeri
-per decidere; il piano non presuppone nessuna delle due.
+**Budget e hardware, già decisi**: GPU **RTX 4080 Super (16 GB)**, target **7–8 ore**
+per run, nessun cloud. Il benchmark 9.3 conferma i token/s effettivi e quindi quanti
+token totali (→ quante epoche sui ~1,5 mld unici) stanno nel budget.
 
 ### ☐ 12.3 — Valutazione e chiusura
 
 **Cosa**: (a) NLL/perplexity su val — nota metodologica: i numeri BPE **non sono
-confrontabili** con la tabella char-level del Percorso A (unità diverse: nats per
-token ≠ nats per carattere; convertiremo in *bits per byte* per avere un metro
-unico attraverso l'intero progetto); (b) galleria di generazioni con prompt
-fissi a più temperature; (c) valutazione qualitativa strutturata su una griglia
-(grammatica / coerenza nel paragrafo / coerenza oltre il paragrafo / fatti); (d)
-aggiornamento finale di atlante e README.
+confrontabili** con la tabella char-level del Percorso A (unità diverse: nats per token
+≠ nats per carattere; convertiremo in *bits per byte* per un metro unico); (b) galleria
+di generazioni con prompt fissi a più temperature; (c) valutazione qualitativa
+strutturata su una griglia (grammatica / coerenza nel paragrafo / coerenza oltre il
+paragrafo / fatti); (d) aggiornamento finale di atlante e README.
 
-**Aspettative oneste, per l'ultima volta**: RonkLM-50M scriverà **frasi italiane
-corrette e paragrafi che stanno in piedi** — registro coerente, anafora corretta
-("Maria… lei…"), argomento mantenuto per qualche frase. Andrà **ancora** alla
-deriva su testi lunghi, inventerà fatti con disinvoltura e **non** eseguirà
-istruzioni ("riassumi questo testo" non funzionerà: è un modello di
-*completamento*, non di *istruzioni* — trasformarlo in assistente richiederebbe
-fine-tuning supervisionato e RLHF, che documenteremo in chiusura come "il
-capitolo successivo che questo progetto sceglie di non fare"). Questo è "sensato,
-non GPT-5.6", per contratto.
+**Aspettative oneste**: RonkLM-150M scriverà **frasi italiane corrette e brevi
+paragrafi che stanno in piedi** — registro coerente, anafora corretta ("Maria… lei…"),
+argomento mantenuto per qualche frase, parole tutte vere. Andrà **ancora** alla deriva
+su testi lunghi, inventerà fatti con disinvoltura e **non** eseguirà istruzioni: è un
+modello di *completamento*. Il comportamento da assistente si costruisce nel **Percorso
+C** (Fase 13), non qui.
 
-**Deliverable di fase e di progetto**: **RonkLM-50M** — un modello addestrato da
-noi, su dati preparati da noi, con un tokenizer scritto da noi, con
-un'architettura di cui possediamo ogni derivata. Fine del Percorso B.
+**Deliverable di fase**: **RonkLM-150M base** — un modello addestrato da noi, su dati
+preparati da noi, con un tokenizer scritto da noi, con un'architettura di cui possediamo
+ogni derivata. Fine del Percorso B.
+
+---
+
+<a name="parte-iii-c"></a>
+# Parte III-C — Percorso C: il chatbot via SFT
+
+**La promessa (onesta) di questo percorso**: trasformare il modello *base* da 150M in un
+**chatbot giocattolo** — tiene il formato della conversazione, risponde a richieste
+semplici — restando inaffidabile (allucina, non ragiona, conoscenza superficiale). È il
+"capitolo successivo" naturale, costruito con lo stesso spirito: capirne ogni pezzo.
+
+**Il concetto chiave: base ≠ chat.** Il modello base *completa* testo. Per "chattare"
+serve insegnargli il **formato** del dialogo e a **seguire istruzioni**, tramite fasi
+aggiuntive di addestramento *dopo* il pretraining. Il calcolo non è il problema (l'SFT
+di un 150M sono minuti/ore sulla 4080); i veri fattori sono i **dati di istruzioni** e
+le **aspettative**.
+
+## ☐ Fase 13 — SFT: da modello base ad assistente
+
+### ☐ 13.1 — I dati: dataset di istruzioni italiani esistenti
+
+**Cosa**: NON costruiamo il dataset da zero — **esistono già** dataset di istruzioni in
+italiano, pronti su HuggingFace. Candidati: traduzioni italiane di **Alpaca** e
+**Dolly**, il sottoinsieme italiano di **OpenAssistant (OASST1/2)**, dataset istruttivi
+IT curati dalla community. Si seleziona una miscela, si uniforma al formato di chat.
+
+**Perché esistono ed è giusto usarli**: creare istruzioni di qualità a mano è
+costosissimo; la community ha già tradotto/curato decine di migliaia di coppie
+`istruzione → risposta` in italiano. La decisione (quali dataset, quanti esempi, come
+filtrare la qualità delle traduzioni) è registrata qui.
+
+### ☐ 13.2 — Il formato di chat e la loss mascherata
+
+**Cosa**: templatizzare le conversazioni con marcatori di ruolo (es.
+`<|user|> … <|assistant|> …`), aggiunti al tokenizer come token speciali. Addestrare
+con **loss solo sui token dell'assistente** (mascherando quelli dell'utente): vogliamo
+insegnargli a *rispondere*, non a ri-generare la domanda.
+
+**Perché la maschera sulla loss**: se calcolassimo la loss anche sui token dell'utente,
+il modello spenderebbe capacità a imparare a *scrivere le domande* invece che le
+risposte. Mascherare l'input è lo standard dell'instruction tuning.
+
+### ☐ 13.3 — Il run di SFT e la valutazione
+
+**Cosa**: fine-tuning del base (learning rate piccolo, 1–3 epoche sul dataset di
+istruzioni), partendo dai pesi della Fase 12. Valutazione: una batteria di prompt di
+prova, giudizio qualitativo (segue il formato? risponde a tono? quanto allucina?).
+
+**Aspettative oneste**: tiene il formato della chat e risponde a richieste semplici e
+frequenti; su ragionamento, fatti e conversazioni lunghe resta debole. Toy assistant,
+non ChatGPT — la soglia di utilità reale è ~1–3 mld di parametri.
+
+**Deliverable di fase**: **RonkLM-Chat** — il modello base istruito, che conversa in
+forma. Fine del Percorso C (se ci fermiamo qui).
+
+## ☐ Fase 14 — (opzionale) Allineamento DPO
+
+**Cosa** (solo se ne varrà la pena): un giro di **DPO** (Direct Preference
+Optimization) su coppie di risposte `preferita / non preferita` per rendere l'assistente
+un po' più utile/coerente. Più semplice del RLHF classico (niente modello di reward
+separato). Documentato come estensione, da valutare dopo aver visto l'SFT.
 
 ---
 
@@ -1863,8 +1950,9 @@ un'architettura di cui possediamo ogni derivata. Fine del Percorso B.
 | M4 — GPT (NumPy) ✅ | 7 | NLL(GPT) < NLL(MLP) su val; generazione con temperature/top-k; checkpoint autosufficiente |
 | M5 — Prodotto A ✅ | 8 | Training da CLI riproducibile; tabella esperimenti; atlante verificato meccanicamente |
 | **M6 — Equivalenza** | 9 | `test_equivalence.py` verde: torch e NumPy danno stessi logits/gradienti/loss entro tolleranza |
-| **M7 — BPE + dati** | 10–11 | BPE round-trip ok su italiano; 1–2 mld di token puliti, deduplicati, binarizzati |
-| **M8 — RonkLM-50M** | 12 | Run da ~50M completato; italiano corretto a livello di frase/paragrafo; valutazione qualitativa documentata |
+| **M7 — BPE + dati** | 10–11 | BPE round-trip ok su italiano; ~1,2–1,5 mld token IT (Wikipedia+Gutenberg) puliti, deduplicati, binarizzati |
+| **M8 — RonkLM-150M** | 12 | Run da ~150M completato su 4080 Super (~8h); italiano corretto a livello di frase/paragrafo; valutazione qualitativa documentata |
+| **M9 — RonkLM-Chat** | 13(–14) | SFT su istruzioni italiane: tiene il formato chat e risponde a richieste semplici (toy assistant); opz. DPO |
 
 ## IV.2 Rituale di fine fase (da istruzioni globali — obbligatorio)
 
@@ -1897,33 +1985,31 @@ sezione a ogni fase e mantiene un indice navigabile.
 
 ## IV.3 Stato attuale
 
-- ☑ **Kickoff**: cartella `memory/` creata; piano v1 redatto; piano v2
-  (riscrittura approfondita) e piano v2.1 (aggiunto Percorso B fino a 50M)
-  completati il 2026-07-18.
-- ☑ **Fase 0 — Fondamenta** ✅ (2026-07-18): git+remote, corpus Pinocchio pulito
-  (240.920 char, vocab 69), `CharTokenizer`, `Dataset`+batching, 16 test verdi.
-  `codebase_reference.md` creato. Branch di rilascio: `v1.1.0`.
-- ☐ **Fase 1 — Bigram per conteggio** *(prossima)*.
-- ☐ Fasi 2–8 (Percorso A, NumPy, ~1M) — non iniziate.
-- ☐ Fasi 9–12 (Percorso B, PyTorch, 50M) — non iniziate; **sbloccate solo a
-  Percorso A completato** (il Percorso A è la suite di test del Percorso B).
+- ☑ **Percorso A COMPLETO** ✅ (2026-07-18/19): Fasi 0–8, tutto in NumPy puro, 78 test
+  verdi. RonkLM v1 (GPT ~160k param, NLL val 1.632). Milestone M1–M5. Ultimo branch
+  `v2.1.0`. Checkpoint locale: `checkpoints/ronklm_v1.npz`.
+- ☐ **Fase 9 — Port a PyTorch** *(prossima, dal 2026-07-20)*.
+- ☐ Fasi 10–12 (Percorso B, PyTorch, **~150M**) — non iniziate.
+- ☐ Fasi 13–14 (Percorso C, chatbot via SFT) — non iniziate.
 
 ## IV.4 Decisioni prese e decisioni aperte
 
 **Prese** (con riferimento alla motivazione):
-- Obiettivo finale: **~50M parametri**, italiano *sensato* a livello di frase/paragrafo (→ intro, Fase 12).
-- Struttura a **due percorsi**: A = capire (NumPy, ~1M); B = scalare (PyTorch, 50M) (→ I.2).
-- Percorso A stack: Python + NumPy puro (→ I.2); tokenizer char-level (→ I.3).
+- Struttura a **tre percorsi**: A = capire (NumPy, ~1M, ✅ fatto); B = scalare (PyTorch,
+  **~150M**); C = istruire (chatbot via SFT) (→ intro, I.2).
+- Percorso A stack: Python + NumPy puro (→ I.2); tokenizer char-level (→ I.3). ✅
 - Percorso B stack: PyTorch dopo test di equivalenza (→ Fase 9); tokenizer BPE a mano (→ Fase 10).
-- Percorso: a fasi, bigram→GPT→scala (→ I.4).
-- Corpus A: italiano, *Pinocchio* (→ I.5). Corpus B: 1–2 mld token italiani (→ Fase 11).
-- Ottimizzatore finale: AdamW scritto a mano (→ 4.4). Architettura: pre-norm (→ 6.4).
+- **Target Percorso B: ~150M parametri** (compute-optimal per 8h × ~1,5 mld token, non VRAM-bound) (→ Parte III-B, 12.1).
+- **Corpus B: italiano — Wikipedia IT + Project Gutenberg *solo italiano*, via Kiwix (ZIM)**; ~1,2–1,5 mld token, 2–3 epoche (→ 11.1).
+- **Hardware B/C: RTX 4080 Super (16 GB), budget ~7–8 h/run, nessun cloud** (→ metadati, 12.2).
+- Percorso C: SFT su dataset di istruzioni italiani **esistenti** (Alpaca-it, Dolly-it, OASST-it) (→ 13.1).
+- Ottimizzatore: AdamW (→ 4.4). Architettura: pre-norm (→ 6.4). Weight tying dalla Fase 12 (→ 12.1).
 - **Remote git**: `github` (Frostmoore/ronklm) + `gitea` (smp-webmaster/ronklm); push su **entrambi** a ogni fine fase.
 
 **Aperte** (da chiudere nella fase indicata):
-- Fonte esatta e regole di pulizia del corpus A → 0.2.
-- Dimensioni del modello A (dipendono dai tempi CPU misurati) → 7.1/8.4.
-- Miscela esatta del corpus B (Wikipedia / libri PD / web curato / eventuale TinyStories-IT) → 11.1.
-- Config esatta del 50M e weight tying → 12.1, guidati dal benchmark 9.3.
-- **Hardware per il run da 50M**: GPU propria vs noleggio cloud → deciso in 12.2 coi numeri di 9.3.
-- Post-progetto (RoPE, dropout, fine-tuning istruzioni/RLHF) → fuori scope, elencati in 12.3.
+- Vocab BPE esatto (~24–32k) e config precisa del 150M (12/14 layer) → 10.2 / 12.1, guidati dal benchmark 9.3.
+- Miscela esatta e proporzioni Wikipedia/Gutenberg; numero di epoche → 11.1, coi token/s misurati in 9.3.
+- Se puntare oltre 150M (la 4080 lo regge, ma serve più tempo/dati) → rivalutare in 12.1 coi numeri.
+- Selezione e filtraggio dei dataset di istruzioni italiani → 13.1.
+- Se fare il giro DPO (Fase 14) → deciso dopo aver visto l'SFT.
+- Post-progetto (RoPE, dropout) → estensioni, elencate in README.
