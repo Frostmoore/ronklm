@@ -1461,13 +1461,20 @@ interamente a mano sopra il nostro autograd, che genera pseudo-Collodi.
 
 ---
 
-## ☐ Fase 8 — Training serio, esperimenti e CLI
+## ☑ Fase 8 — Training serio, esperimenti e CLI  ✅ COMPLETATA (2026-07-19)
+
+> **Esito**: `train.py` (loop robusto: warmup+cosine, eval mediata, best-checkpoint,
+> grad clipping), `scripts/train_ronklm.py` (CLI train/generate). Sweep
+> one-factor-at-a-time documentato (profondità e contesto). README con quickstart,
+> tabella NLL e galleria. Verifica meccanica firme eseguita. 78 test. **Percorso A
+> COMPLETO.** Branch `v2.1.0`.
+
 
 **Obiettivo didattico.** Da "gira" a "gira bene, si misura e si usa". Gli
 iperparametri si capiscono solo toccandoli: questa fase è un laboratorio
 sperimentale documentato.
 
-### ☐ 8.1 — CLI (`scripts/train_ronklm.py`)
+### ☑ 8.1 — CLI (`scripts/train_ronklm.py`)
 
 **Cosa**: entrypoint `argparse`: sottocomandi `train` (dataset, config modello,
 lr, step, seed, checkpoint di ripresa) e `generate` (checkpoint, prompt,
@@ -1478,7 +1485,7 @@ riproducibile dal suo *comando* (che salveremo nel log dell'esperimento insieme 
 seed — II.2.3); modificare il codice a ogni prova distrugge la confrontabilità tra
 esperimenti, che in 8.4 è tutto.
 
-### ☐ 8.2 — Loop di training robusto
+### ☑ 8.2 — Loop di training robusto
 
 **Cosa**: eval periodica su val (media su più batch), log a intervalli regolari
 (step, loss, lr corrente, tempo/step), checkpoint del *best model* su val,
@@ -1492,7 +1499,7 @@ non l'ultimo**: se il modello inizia a overfittare (4.3), l'ultimo checkpoint è
 *peggiore* di uno intermedio; tenere il migliore su val è la forma più semplice di
 early stopping.
 
-### ☐ 8.3 — Learning rate schedule: warmup + cosine decay
+### ☑ 8.3 — Learning rate schedule: warmup + cosine decay
 
 **Cosa**: lr che sale linearmente da ~0 al valore pieno nei primi ~2–5% degli step
 (warmup), poi scende seguendo un coseno fino a ~1/10 del picco.
@@ -1508,7 +1515,7 @@ proporzionale al lr). Ridurre il lr permette di *depositarsi*. Il coseno è la
 forma dolce standard (nessun salto brusco); l'effetto del solo schedule sulla NLL
 finale è visibile e lo misureremo (esperimento in 8.4).
 
-### ☐ 8.4 — Il laboratorio: esperimenti documentati
+### ☑ 8.4 — Il laboratorio: esperimenti documentati
 
 **Cosa**: griglia di esperimenti one-factor-at-a-time, ognuno con comando, seed,
 curva e NLL finale, raccolti in una tabella nel reference: profondità
@@ -1523,7 +1530,7 @@ qui l'obiettivo è *capire il contributo di ogni idea*, non trovare l'ottimo.
 È il metodo sperimentale applicato al nostro stesso progetto, e la tabella finale
 è la risposta empirica alla domanda "cosa compra ciascun pezzo del transformer?".
 
-### ☐ 8.5 — README e galleria
+### ☑ 8.5 — README e galleria
 
 **Cosa**: README con quickstart (installare, addestrare, generare in 3 comandi),
 la tabella NLL completa bigram→GPT, campioni di testo per fase (la "galleria
@@ -1535,7 +1542,7 @@ passo giusto.
 GPT sullo stesso prompt è la dimostrazione più eloquente dell'intero progetto —
 si *vede* la scala di modelli promessa in I.1.
 
-### ☐ 8.6 — Verifica finale dell'atlante
+### ☑ 8.6 — Verifica finale dell'atlante
 
 **Cosa**: passata meccanica di verifica del `codebase_reference.md` contro il
 codice reale (estrazione firme via grep/AST e confronto, come da istruzioni
@@ -1854,7 +1861,7 @@ un'architettura di cui possediamo ogni derivata. Fine del Percorso B.
 | M2 — Motore | 3–4 | `test_autograd.py` verde su ogni op; NLL(MLP) < NLL(bigram) su val |
 | M3 — Attenzione ✅ | 5–6 | Blocco transformer con gradient check ok e gradienti presenti su tutti i parametri |
 | M4 — GPT (NumPy) ✅ | 7 | NLL(GPT) < NLL(MLP) su val; generazione con temperature/top-k; checkpoint autosufficiente |
-| M5 — Prodotto A | 8 | Training da CLI riproducibile; tabella esperimenti; atlante verificato meccanicamente |
+| M5 — Prodotto A ✅ | 8 | Training da CLI riproducibile; tabella esperimenti; atlante verificato meccanicamente |
 | **M6 — Equivalenza** | 9 | `test_equivalence.py` verde: torch e NumPy danno stessi logits/gradienti/loss entro tolleranza |
 | **M7 — BPE + dati** | 10–11 | BPE round-trip ok su italiano; 1–2 mld di token puliti, deduplicati, binarizzati |
 | **M8 — RonkLM-50M** | 12 | Run da ~50M completato; italiano corretto a livello di frase/paragrafo; valutazione qualitativa documentata |

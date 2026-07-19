@@ -103,6 +103,13 @@
   - [7.4 Il checkpoint autosufficiente](#sec-7-4)
   - [7.5 RonkLM v1: i numeri e il testo](#sec-7-5)
   - [7.6 Glossario Fase 7 / cosa arriva in Fase 8](#sec-7-6)
+- [Fase 8 — Training serio, CLI ed esperimenti](#fase-8)
+  - [8.0 Da "gira" a "gira bene e si usa"](#sec-8-0)
+  - [8.1 La CLI: esperimenti riproducibili dal comando](#sec-8-1)
+  - [8.2 Il loop robusto: eval, best-checkpoint, clipping](#sec-8-2)
+  - [8.3 Il learning-rate schedule: warmup e cosine decay](#sec-8-3)
+  - [8.4 Il laboratorio: cosa compra ogni iperparametro](#sec-8-4)
+  - [8.5 Chiusura del Percorso A](#sec-8-5)
 
 ---
 
@@ -2871,3 +2878,181 @@ risultato. È la chiusura del Percorso A.
 ---
 
 *Fine del capitolo Fase 7.*
+
+---
+
+<a name="fase-8"></a>
+# Fase 8 — Training serio, CLI ed esperimenti
+
+RonkLM v1 gira. Questa fase lo porta da "gira" a "gira bene, si misura e si usa": un
+training loop robusto, una CLI per addestrare e generare in modo riproducibile, e una
+serie di esperimenti che mostrano *cosa compra* ogni pezzo del transformer. È la
+chiusura del Percorso A.
+
+📁 File: [`ronklm/train.py`](ronklm/train.py),
+[`scripts/train_ronklm.py`](scripts/train_ronklm.py)
+
+---
+
+<a name="sec-8-0"></a>
+## 8.0 Da "gira" a "gira bene e si usa"
+
+Fin qui abbiamo addestrato con cicli scritti a mano dentro script di prova. Va bene per
+capire, ma per *usare* il modello e per fare esperimenti seri servono tre cose che
+mancavano: un modo riproducibile di lanciare un training (la CLI), un loop che si
+misura e salva il modello migliore (non l'ultimo), e un controllo intelligente del
+learning rate nel tempo (lo schedule). Le costruiamo qui.
+
+---
+
+<a name="sec-8-1"></a>
+## 8.1 La CLI: esperimenti riproducibili dal comando
+
+Lo script `train_ronklm.py` offre due sottocomandi, `train` e `generate`:
+
+```bash
+python scripts/train_ronklm.py train --steps 3000 --n-layer 3 --n-embd 64 --out ckpt.npz
+python scripts/train_ronklm.py generate --ckpt ckpt.npz --prompt "Pinocchio " --temperature 0.8 --top-k 20
+```
+
+> **📖 Perché una CLI e non un notebook che si modifica.** Ogni esperimento resta
+> riproducibile dal suo **comando**: il comando, insieme al seed fisso, individua
+> univocamente il run. Se modificassi il codice a ogni prova, la confrontabilità tra
+> esperimenti — che è tutto il punto della [sezione 8.4](#sec-8-4) — andrebbe persa.
+> Il comando *è* la documentazione dell'esperimento.
+
+---
+
+<a name="sec-8-2"></a>
+## 8.2 Il loop robusto: eval, best-checkpoint, clipping
+
+Il `train()` in [`train.py`](ronklm/train.py) aggiunge tre pratiche essenziali al ciclo
+base della [Fase 2.4](#sec-2-4).
+
+> **📖 Eval mediata su più batch.** La loss di un singolo batch è rumorosa
+> ([Fase 2.4](#sec-2-4)): su un batch fortunato sembrerebbe un progresso che non esiste.
+> Misuriamo la NLL di validation mediando su 20–25 batch *fissi* (seed fisso): un numero
+> stabile su cui prendere decisioni.
+
+> **📖 Salvare il *best*, non l'ultimo.** Se il modello inizia a overfittare
+> ([Fase 4.6](#sec-4-6)), l'ultimo checkpoint è *peggiore* di uno intermedio. Salviamo
+> il modello con la miglior NLL di validation vista finora: è la forma più semplice di
+> "early stopping".
+
+> **📖 Gradient clipping.** Su tanti batch, prima o poi qualcuno produce un gradiente
+> anomalo (un pezzo di testo strano, una coincidenza numerica). Un singolo passo gigante
+> può buttare il modello in una zona da cui non si riprende (un "loss spike"). Il
+> clipping taglia la *norma globale* del gradiente a una soglia: un'assicurazione a
+> costo praticamente nullo. Lo verifichiamo con un test (limita la norma, ma lascia
+> intatti i gradienti piccoli).
+
+---
+
+<a name="sec-8-3"></a>
+## 8.3 Il learning-rate schedule: warmup e cosine decay
+
+Il learning rate non resta fisso: parte da ~0, sale linearmente (warmup) per i primi
+passi, poi scende dolcemente seguendo un coseno fino a un valore minimo.
+
+> **📖 Perché il warmup — legato ad Adam ([Fase 4.5](#sec-4-5)).** Nei primissimi passi
+> le medie mobili di Adam sono stime basate su pochissimi campioni; in particolare il
+> secondo momento (che sta al *denominatore* del passo) può essere sottostimato → passi
+> enormi in direzioni rumorose, su una rete appena inizializzata che è nel suo punto più
+> fragile. Il warmup tiene i passi piccoli finché le stime non maturano.
+
+> **📖 Perché il decay finale.** A fine training si è vicini a un minimo; con passi
+> grandi si *orbita* attorno al minimo senza entrarci (l'ampiezza dell'oscillazione è
+> proporzionale al lr). Ridurre il lr permette di *depositarsi* nel minimo. Il coseno è
+> la forma dolce standard, senza salti bruschi. (Lo verifichiamo con due test: il warmup
+> sale, il coseno scende fino a `min_lr`.)
+
+---
+
+<a name="sec-8-4"></a>
+## 8.4 Il laboratorio: cosa compra ogni iperparametro
+
+Gli iperparametri non si capiscono leggendone la definizione: si capiscono
+*toccandoli* e guardando l'effetto. Abbiamo fatto una serie di esperimenti
+**one-factor-at-a-time** (cambiando *una* cosa per volta), tutti con lo stesso seed e
+lo stesso numero di passi, così le differenze sono attribuibili a quel solo fattore.
+
+**Esperimento 1 — la profondità** (quanti blocchi in pila; block_size 32, 1000 passi):
+
+```
+n_layer   parametri   NLL val
+   1        36 k       2.030
+   2        65 k       1.942
+   4       121 k       1.886
+```
+
+Trend nettissimo e monotono: **più blocchi = NLL più bassa**. Ogni blocco aggiunge un
+giro di "comunica (attention) → pensa (FFN)", e componendone di più il modello
+rappresenta trasformazioni più ricche. È la conferma sperimentale del perché i GPT sono
+"profondi".
+
+**Esperimento 2 — il contesto** (quanti caratteri guarda; n_layer 2, 1000 passi):
+
+```
+block_size   parametri   NLL val
+    16         64 k       1.944
+    32         65 k       1.942
+    64         66 k       1.986   ← peggio!
+```
+
+Qui un risultato **controintuitivo e istruttivo**: a parità di training (1000 passi),
+il contesto più lungo (64) va *peggio* di quello medio (32). Come mai? Un contesto più
+lungo significa più posizioni da imparare a usare e un'attenzione più grande da tarare:
+con un *budget di training corto* non fa in tempo a ripagare l'investimento. Non è che
+"più contesto è peggio" in assoluto — è che più contesto ha bisogno di *più passi* per
+rendere. È esattamente il tipo di verità che si scopre solo *misurando*, e che un
+tutorial superficiale ("più grande è meglio") nasconderebbe.
+
+> **Nota onesta sul metodo.** Questi sono run brevi (1000 passi) e piccoli, scelti per
+> girare in fretta su CPU: mostrano il *trend*, non la NLL più bassa raggiungibile.
+> RonkLM v1 ([Fase 7.5](#sec-7-5)), addestrato più a lungo, arriva a 1.632. E ci sono
+> esperimenti che *non* abbiamo fatto (larghezza `n_embd`, numero di teste, schedule
+> on/off, weight decay): li lasciamo come esercizio, segnalando esplicitamente che
+> mancano — un laboratorio non deve mai far credere di aver coperto tutto.
+
+> **📖 Perché one-factor-at-a-time.** Cambiando due cose insieme non si saprebbe a
+> quale attribuire la differenza. È meno efficiente di una ricerca su griglia completa,
+> ma qui l'obiettivo non è trovare l'ottimo: è *capire il contributo di ogni idea*. È il
+> metodo sperimentale applicato al nostro stesso modello. (Nota onesta: questi run sono
+> brevi e piccoli, scelti per essere eseguibili in fretta su CPU; servono a mostrare il
+> **trend**, non a raggiungere la NLL più bassa possibile. Un training più lungo, come
+> quello di RonkLM v1 in [Fase 7.5](#sec-7-5), arriva più in basso.)
+
+---
+
+<a name="sec-8-5"></a>
+## 8.5 Chiusura del Percorso A
+
+Con la Fase 8 il Percorso A è **completo**. Fermiamoci a guardare cosa abbiamo
+costruito, partendo da NumPy e nient'altro:
+
+- un **tokenizer** e una pipeline di dati (Fase 0);
+- la **loss** cross-entropy e il primo modello, il bigram (Fase 1);
+- la **backpropagation**, derivata a mano (Fase 2);
+- un intero **motore di autograd**, `ronkgrad`, verificato al bit (Fase 3);
+- gli **embedding**, gli strati nascosti, l'ottimizzatore **AdamW** (Fase 4);
+- la **self-attention** causale (Fase 5);
+- il **blocco transformer** con multi-head, feed-forward, LayerNorm e residual (Fase 6);
+- il **GPT completo**, RonkLM v1, con positional embedding e generazione (Fase 7);
+- il **training serio** con schedule, CLI ed esperimenti (Fase 8).
+
+Ogni singola operazione che RonkLM esegue — ogni moltiplicazione, ogni gradiente, ogni
+`softmax` — l'abbiamo scritta e capita noi. Quando in un LLM vero incontrerai
+`nn.MultiheadAttention`, `F.cross_entropy`, `torch.optim.AdamW`, `loss.backward()`, non
+vedrai più scatole nere: vedrai cose di cui possiedi la versione fatta a mano.
+
+**Cosa arriva dopo (Percorso B).** RonkLM v1 scrive *forma* di italiano ma non *senso*,
+perché è minuscolo. Per arrivare a un modello che scrive frasi e paragrafi sensati
+servono ~50M di parametri, gigabyte di testo e una GPU — cose che NumPy su CPU non può
+reggere (il perché quantitativo è in [Fase I.2](#sec-i-2), se rileggi il piano). Il
+Percorso B (Fasi 9–12) porta lì: port a PyTorch *dimostrato equivalente* a questo
+motore, tokenizer BPE scritto a mano, corpus grande, training su GPU. Ma è un altro
+viaggio. Per ora, abbiamo fatto la cosa più importante: **capito**.
+
+---
+
+*Fine del capitolo Fase 8 — e del Percorso A.*
