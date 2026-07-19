@@ -5,9 +5,9 @@
 > aprire i file**. Se per sapere la firma di un metodo bisogna leggere il sorgente,
 > questo documento ha fallito.
 >
-> **Stato**: aggiornato a fine **Fase 6** (2026-07-18). Copre corpus, tokenizer,
-> dataset, bigram, autograd, nn/optim, MLP, self-attention, blocco transformer, test.
-> Milestone M1/M2/M3 completate. Piano in [`plan_ronklm_system.md`](plan_ronklm_system.md).
+> **Stato**: aggiornato a fine **Fase 7** (2026-07-19). Copre tutto il Percorso A fino
+> al GPT completo (RonkLM v1, NLL val 1.632) + infrastruttura di training/CLI (Fase 8 in
+> corso). Milestone M1–M4 completate. Piano in [`plan_ronklm_system.md`](plan_ronklm_system.md).
 >
 > **Verifica meccanica firme**: eseguita a fine Fase 0 con estrazione `def`/`class`
 > via grep e confronto con le tabelle qui sotto. ✅ Allineato.
@@ -32,6 +32,10 @@
 | Self-attention causale (Fase 5) | `Head`, `AttentionLM` in [`ronklm/models/attention.py`](../ronklm/models/attention.py) |
 | Blocco transformer (Fase 6) | `Block`, `MultiHeadAttention`, `FeedForward` in [`ronklm/models/block.py`](../ronklm/models/block.py) |
 | LayerNorm (Fase 6) | `LayerNorm` in [`ronklm/nn.py`](../ronklm/nn.py) · `cat` in [`ronklm/autograd.py`](../ronklm/autograd.py) |
+| GPT completo (Fase 7) | `GPT`, `GPTConfig` in [`ronklm/models/gpt.py`](../ronklm/models/gpt.py) |
+| Generazione (temperature/top-k) | `generate()` in [`ronklm/generate.py`](../ronklm/generate.py) |
+| Training loop + schedule (Fase 8) | `train()`, `cosine_lr()`, `evaluate()` in [`ronklm/train.py`](../ronklm/train.py) |
+| CLI addestra/genera (Fase 8) | [`scripts/train_ronklm.py`](../scripts/train_ronklm.py) |
 | Eseguire tutti i test | `python run_tests.py` (radice) |
 | Runner di test senza pytest | [`tests/_runner.py`](../tests/_runner.py) |
 | Versione del pacchetto | `__version__` in [`ronklm/__init__.py`](../ronklm/__init__.py) |
@@ -51,16 +55,21 @@ RonkLM/
 │   ├── __init__.py            # docstring pacchetto + __version__
 │   ├── tokenizer.py           # CharTokenizer
 │   ├── dataset.py             # load_text(), Dataset
-│   ├── autograd.py            # ronkgrad: Tensor + cross_entropy (Fase 3)
-│   ├── nn.py                  # Module, Linear, Embedding (Fase 4)
+│   ├── autograd.py            # ronkgrad: Tensor + cross_entropy + cat (Fase 3/6)
+│   ├── nn.py                  # Module, Linear, Embedding, LayerNorm (Fase 4/6)
 │   ├── optim.py               # SGD, AdamW (Fase 4)
+│   ├── generate.py            # generate() con temperature/top-k (Fase 7)
+│   ├── train.py               # train(), cosine_lr(), evaluate() (Fase 8)
 │   └── models/
 │       ├── __init__.py
 │       ├── bigram_count.py    # BigramCount (Fase 1)
 │       ├── bigram_neural.py   # BigramNeural (Fase 2)
 │       ├── mlp.py             # MLP (Fase 4)
 │       ├── attention.py       # Head, AttentionLM (Fase 5)
-│       └── block.py           # Block, MultiHeadAttention, FeedForward (Fase 6)
+│       ├── block.py           # Block, MultiHeadAttention, FeedForward (Fase 6)
+│       └── gpt.py             # GPT, GPTConfig (Fase 7)
+├── scripts/
+│   └── train_ronklm.py        # CLI: train / generate (Fase 8)
 ├── tests/
 │   ├── _runner.py             # run(namespace) -> n_fallimenti
 │   ├── _gradcheck.py          # grad_check condiviso (autograd + block)
@@ -71,7 +80,9 @@ RonkLM/
 │   ├── test_autograd.py       # 24 gradient check
 │   ├── test_mlp.py            # 5 test
 │   ├── test_attention.py      # 4 test
-│   └── test_block.py          # 6 test
+│   ├── test_block.py          # 6 test
+│   ├── test_gpt.py            # 8 test
+│   └── test_train.py          # 4 test
 ├── run_tests.py               # lancia tutti i tests/test_*.py
 ├── explain.md                 # libro di testo: spiegazione didattica per fase
 ├── requirements.txt           # numpy (+ matplotlib opz., torch dalla Fase 9)
@@ -335,7 +346,45 @@ all'ordine; la potenza arriva in F6/F7). Attention verificata causale e normaliz
 **Verificato**: LayerNorm normalizza e supera il gradient check; Block preserva la
 shape `(B,T,C)` ed è impilabile; ogni parametro riceve gradiente.
 
-### 3.11 `data/prepare_corpus.py` — script di preparazione corpus
+### 3.11 `ronklm/models/gpt.py` — il GPT completo (Fase 7)
+
+`@dataclass GPTConfig`: `vocab_size`, `block_size=32`, `n_layer=4`, `n_head=4`,
+`n_embd=64`. Salvata dentro il checkpoint.
+
+Classe `GPT(Module)`. Attributi: `config`, `tok_emb`/`pos_emb` (Embedding),
+`blocks` (list[Block]), `ln_f` (LayerNorm), `head` (Linear).
+
+| Metodo | Firma | Effetto |
+|---|---|---|
+| `__init__` | `(self, config: GPTConfig, rng)` | costruisce embedding, N blocchi, ln finale, testa |
+| `logits` | `(self, idx: np.ndarray) -> Tensor` | `(B,T)` → `(B,T,vocab)`; `tok+pos → blocchi → ln_f → head` |
+| `loss` | `(self, idx, targets) -> Tensor` | CE su tutte le `B·T` posizioni |
+| `save` | `(self, path, tokenizer) -> None` | `.npz` con pesi + config + `chars` (autosufficiente) |
+| `load` | `(path, rng) -> (GPT, CharTokenizer)` *(classmethod)* | ricostruisce modello e tokenizer |
+| `num_params` | `(self) -> int` | numero totale di parametri |
+
+### 3.12 `ronklm/generate.py`
+
+| Funzione | Firma | Effetto |
+|---|---|---|
+| `generate` | `(model, context: list[int], max_new_tokens, rng, temperature=1.0, top_k=None) -> list[int]` | campionamento autoregressivo; tronca a `block_size`; applica temperature e top-k |
+
+### 3.13 `ronklm/train.py` (Fase 8)
+
+| Funzione | Firma | Effetto |
+|---|---|---|
+| `cosine_lr` | `(step, base_lr, warmup, max_steps, min_lr) -> float` | warmup lineare + decadimento coseno |
+| `evaluate` | `(model, ds, split, block_size, batch_size, n_batches, seed=999) -> float` | NLL media su batch fissi |
+| `train` | `(model, ds, tokenizer, *, steps, batch_size=32, base_lr=3e-3, min_lr=3e-4, warmup=100, weight_decay=1e-4, eval_every=250, eval_batches=20, seed=1, ckpt_path=None, log_path=None, grad_clip=1.0) -> dict` | loop con schedule, eval, best-checkpoint, grad clipping, log CSV |
+| `_clip_gradients` | `(params, max_norm) -> None` | taglia la norma globale dei gradienti |
+
+### 3.14 `scripts/train_ronklm.py` — CLI (Fase 8)
+
+Sottocomandi `train` (data, steps, batch-size, block-size, n-layer, n-head, n-embd,
+lr, warmup, weight-decay, eval-every, seed, out, log) e `generate` (ckpt, prompt, n,
+temperature, top-k, seed).
+
+### 3.15 `data/prepare_corpus.py` — script di preparazione corpus
 
 Funzioni (tutte a livello di modulo; script eseguibile con `python data/prepare_corpus.py [--force]`):
 
@@ -394,7 +443,14 @@ argomenti di funzione con default:
 
 ## 6. Catalogo dei test
 
-Runner: `python run_tests.py` (nessun pytest richiesto). **66 test, tutti verdi.**
+Runner: `python run_tests.py` (nessun pytest richiesto). **78 test, tutti verdi.**
+
+`tests/test_gpt.py` (8): shape logit/loss, loss iniziale ~log(V), tutti i parametri
+con gradiente, generazione valida/riproducibile, top-k restringe il supporto,
+temperature→0 = greedy, **save/load** dà logit identici, breve training scende.
+
+`tests/test_train.py` (4): warmup lineare, cosine decay a min_lr, grad-clip limita la
+norma e lascia intatti i gradienti piccoli.
 
 `tests/test_block.py` (6):
 

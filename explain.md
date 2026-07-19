@@ -95,6 +95,14 @@
   - [6.5 Pre-norm vs post-norm](#sec-6-5)
   - [6.6 Il blocco è impilabile](#sec-6-6)
   - [6.7 Glossario Fase 6 / cosa arriva in Fase 7](#sec-6-7)
+- [Fase 7 — RonkLM: il GPT completo](#fase-7)
+  - [7.0 Assemblare tutti i pezzi](#sec-7-0)
+  - [7.1 Il positional embedding: dare un ordine alla sequenza](#sec-7-1)
+  - [7.2 Lo stack di blocchi e la testa finale](#sec-7-2)
+  - [7.3 La generazione: temperature e top-k](#sec-7-3)
+  - [7.4 Il checkpoint autosufficiente](#sec-7-4)
+  - [7.5 RonkLM v1: i numeri e il testo](#sec-7-5)
+  - [7.6 Glossario Fase 7 / cosa arriva in Fase 8](#sec-7-6)
 
 ---
 
@@ -2615,3 +2623,251 @@ che scrive pseudo-Collodi, carattere per carattere.
 ---
 
 *Fine del capitolo Fase 6.*
+
+---
+
+<a name="fase-7"></a>
+# Fase 7 — RonkLM: il GPT completo
+
+Ci siamo. Mettiamo insieme tutti i pezzi costruiti finora in un vero transformer
+decoder-only, colmiamo l'ultimo buco concettuale (l'ordine delle parole) e costruiamo
+la generazione con le sue manopole. Il risultato è **RonkLM v1**: un GPT giocattolo,
+scritto interamente a mano sopra `ronkgrad`, che scrive pseudo-Collodi carattere per
+carattere.
+
+📁 File: [`ronklm/models/gpt.py`](ronklm/models/gpt.py),
+[`ronklm/generate.py`](ronklm/generate.py)
+
+---
+
+<a name="sec-7-0"></a>
+## 7.0 Assemblare tutti i pezzi
+
+L'architettura del GPT è, letteralmente, la somma di ciò che abbiamo costruito:
+
+```
+indici (B, T)
+  │
+  ▼  token embedding (Fase 4)     +   positional embedding (nuovo)
+  (B, T, C)                            (T, C)
+  │
+  ▼  Block × n_layer (Fase 6)     ← attention (5) + feed-forward + residual + norm
+  (B, T, C)
+  │
+  ▼  LayerNorm finale (Fase 6)
+  │
+  ▼  Linear → vocab (Fase 4)
+  (B, T, vocab)   = logits del prossimo carattere a OGNI posizione
+```
+
+Nel codice il forward è di una brevità che, dopo tutto questo percorso, quasi
+commuove:
+
+```python
+tok = self.tok_emb(idx)          # (B, T, C)   significato dei caratteri
+pos = self.pos_emb(np.arange(T)) # (T, C)      posizione nella sequenza
+x = tok + pos                    # (B, T, C)   somma
+for blk in self.blocks:
+    x = blk(x)                   # attenzione + elaborazione, N volte
+x = self.ln_f(x)                 # normalizzazione finale
+return self.head(x)              # (B, T, vocab)
+```
+
+Ogni riga è un pezzo che conosciamo dall'interno. Non c'è una sola operazione di cui
+non sappiamo derivare il gradiente. Questo è il senso dell'intero Percorso A.
+
+---
+
+<a name="sec-7-1"></a>
+## 7.1 Il positional embedding: dare un ordine alla sequenza
+
+C'è un solo ingrediente nuovo, e risolve il difetto notato in [Fase 5.6](#sec-5-6):
+l'attention è **cieca all'ordine**.
+
+> **📖 Concetto: l'attention è un'operazione su insiemi.** Se permuti i token di input
+> (e le maschere), i prodotti `q · k` non cambiano: nulla, nel meccanismo di attention,
+> sa che un token viene *prima* di un altro. Ma "ma la" ≠ "la ma": l'ordine è metà del
+> linguaggio. All'attention manca il senso della posizione.
+
+La soluzione è elegante: una **seconda tabella di embedding**, indicizzata non dal
+carattere ma dalla **posizione** (0, 1, 2, …, block_size−1). La riga `t` di questa
+tabella è la "firma" appresa della posizione `t`. La sommiamo al token embedding:
+
+```python
+x = tok + pos     # ogni carattere porta con sé "chi sono" E "dove sono"
+```
+
+Così ogni vettore in ingresso ai blocchi codifica due informazioni sovrapposte:
+*quale* carattere è (dal token embedding) e *in quale posizione* si trova (dal
+positional embedding). Le teste di attention possono ora imparare pattern posizionali
+("guarda il carattere immediatamente precedente") oltre che di contenuto ("cerca una
+vocale").
+
+> **📖 Perché sommare e non concatenare.** La somma mantiene la dimensione (i blocchi
+> restano identici e impilabili). E con vettori appresi in uno spazio ampio, la rete
+> ha campo libero di dedicare "direzioni" diverse ai due tipi di informazione se le
+> serve. Empiricamente funziona bene quanto la concatenazione, a costo zero. (I LLM
+> moderni usano schemi più sofisticati — RoPE — ma l'embedding posizionale appreso è
+> quello di GPT-2 ed è perfetto per capire il problema.)
+
+> **📖 Perché la LayerNorm finale.** Dopo l'ultimo blocco, il segnale è la somma di
+> tutti i contributi residui accumulati, su una scala non controllata. La testa che
+> produce i logit lavora molto meglio su un segnale rinormalizzato. È lo standard di
+> GPT-2, coerente con la logica pre-norm della [sezione 6.5](#sec-6-5).
+
+---
+
+<a name="sec-7-2"></a>
+## 7.2 Lo stack di blocchi e la testa finale
+
+I blocchi (Fase 6) si impilano semplicemente in una lista, perché — lo avevamo
+verificato — preservano la forma `(B, T, C)`: l'output di uno è l'input valido del
+successivo. Più blocchi = più profondità = più capacità di comporre trasformazioni
+complesse. La `head` finale (un `Linear`) proietta ogni vettore di posizione sui
+`vocab` logit del prossimo carattere.
+
+Il forward produce logit per **ogni** posizione `(B, T, vocab)`, e la loss è la
+cross-entropy su **tutte** le `B·T` posizioni contemporaneamente:
+
+```python
+return cross_entropy(logits.reshape(B * T, V), targets.reshape(B * T))
+```
+
+> **🔧 Qui si raccoglie tutto ciò che si era seminato.** Il "T esempi al prezzo di
+> uno" preparato in [Fase 0.8](#sec-0-8) (Y = X spostato) e reso legale dalla maschera
+> causale in [Fase 5.3](#sec-5-3): ogni batch da `(B, T)` produce `B·T` esempi di
+> addestramento in un solo forward. Un batch `(16, 32)` = 512 predizioni per passo.
+> Senza questa struttura, addestrare transformer non sarebbe economicamente possibile.
+
+---
+
+<a name="sec-7-3"></a>
+## 7.3 La generazione: temperature e top-k
+
+Un GPT addestrato *predice*; per farlo *scrivere* serve la generazione autoregressiva
+([`generate.py`](ronklm/generate.py)): forward sugli ultimi `block_size` caratteri,
+prendi i logit dell'**ultima** posizione, campiona il prossimo carattere, appendilo,
+ripeti.
+
+> **🔧 Perché si troncano gli ultimi block_size caratteri.** La tabella posizionale ha
+> esattamente `block_size` righe e le matrici di attenzione sono `T×T`: oltre quella
+> finestra il modello semplicemente non è definito. È il famoso **limite di contesto**
+> dei LLM — ora sai da quali due tensori nasce.
+
+Due manopole controllano *come* si campiona:
+
+> **📖 Temperature.** Si dividono i logit per `τ` prima della softmax. Per
+> l'esponenziale della softmax: `τ < 1` *allarga* le differenze tra i logit →
+> distribuzione più appuntita → testo più conservativo e ripetitivo; `τ > 1` le
+> comprime → più vario e più sgangherato; `τ → 0` = greedy (sceglie sempre il massimo:
+> degenere e ciclico, come previsto in [Fase 1.3](#sec-1-3)). Non cambia *l'ordine*
+> delle preferenze del modello: cambia quanto ci si azzarda a deviare dalla prima
+> scelta.
+
+> **📖 Top-k.** La coda della distribuzione (decine di caratteri a probabilità minuscola
+> ma non nulla) ogni tanto viene comunque pescata, e un singolo carattere assurdo (una
+> `%` in mezzo a una parola) può far *deragliare tutto il seguito*: il modello non ha
+> mai visto contesti con quel carattere lì, e genera spazzatura da spazzatura (è
+> l'**errore composto**: il testo esce dalla distribuzione su cui il modello è stato
+> addestrato). Top-k taglia la coda: tiene solo i `k` logit migliori, azzera gli altri,
+> rinormalizza. Insieme, temperature e top-k sono le stesse due manopole dei LLM di
+> produzione.
+
+---
+
+<a name="sec-7-4"></a>
+## 7.4 Il checkpoint autosufficiente
+
+Il metodo `save` scrive in un unico file `.npz`: **i pesi + la config + il
+vocabolario**.
+
+> **📖 Perché tutto insieme.** Un modello char-level ricaricato con un vocabolario
+> diverso da quello di training produce spazzatura *deterministica* e difficilissima da
+> diagnosticare: i pesi sono "giusti" ma parlano un'altra mappa di indici (il carattere
+> 30 ora è `q` invece di `a`). E una config diversa non fa nemmeno combaciare le shape.
+> Il checkpoint deve essere **autosufficiente**: pesi, mappa dei caratteri e
+> architettura, sempre insieme. (Abbiamo un test che salva e ricarica, e verifica che i
+> logit siano identici bit per bit: la prova che il modello ricaricato *è* lo stesso.)
+
+---
+
+<a name="sec-7-5"></a>
+## 7.5 RonkLM v1: i numeri e il testo
+
+Abbiamo addestrato un GPT piccolo (**3 layer, 4 teste, n_embd 64, block_size 32, ~160k
+parametri**) per 3000 passi. Ecco la spina dorsale sperimentale del progetto, la tabella
+delle NLL di validation che cresce a ogni modello:
+
+```
+modello                      NLL val    perplexity   cosa ha aggiunto
+─────────────────────────────────────────────────────────────────────────────
+uniforme (tira a caso)       4.234       69          niente
+bigram (conteggio, Fase 1)   2.346       10.4        distribuzione sul prossimo char
+MLP (contesto 8, Fase 4)     1.897        6.7        embedding + contesto + hidden
+GPT (RonkLM v1, Fase 7)      1.632        5.1        attention + posizione + profondità
+```
+
+Ogni riga è una *idea* che abbiamo aggiunto e il miglioramento misurabile che ha
+comprato. Dal caos (69 caratteri equiprobabili) a un modello che, in media, esita tra
+~5 caratteri: la sorpresa per carattere si è più che dimezzata rispetto al bigram.
+
+E il testo? Ecco RonkLM v1 che completa il prompt "Pinocchio " (temperature 0.6, top-k 20):
+
+```
+Pinocchio a stare il mio tirò Pinocchio, con mi pesse diretto dalla spaggio dettorna
+da di farò a parere di gallina di grande di sè: — Ma in poco da nottere a casa
+mozzare a un bel pesce di mani un po' di piedi.
+— No, rangia si disse:
+— Non la vocina le portice di cas
+```
+
+Facciamo il punto con onestà da ricercatore. **Non è italiano coerente** — e non
+poteva esserlo: 160k parametri, mezzo megabyte di testo, un modello che sta su una CPU.
+Ma guarda cosa è comparso rispetto al bigram sillabico di [Fase 1](#sec-1-6): quasi
+**tutte parole vere** (`stare`, `pesce`, `casa`, `piedi`, `grande`, `disse`), il nome
+`Pinocchio` scritto giusto e ripetuto, la **struttura dei dialoghi** collodiani (`— Ma
+…`, `— No, … si disse:`), la punteggiatura al posto giusto, gli a-capo dei paragrafi.
+Manca il senso globale — la frase parte e si perde — ma la *forma* dell'italiano
+narrativo c'è. Questo è esattamente il risultato corretto a questa scala: lo scopo del
+Percorso A era **vedere la macchina imparare e capirne ogni pezzo**, non ottenere uno
+scrittore (quello è l'obiettivo del Percorso B, con 50M di parametri e gigabyte di
+testo).
+
+> **🔧 Cosa fa la temperature, visto dal vivo.** A temperature 0.6 (sopra) il testo è
+> più prudente e ripetitivo; alzandola a 0.9 diventa più avventuroso e sgangherato
+> (più parole inventate, più varietà). Sono le due estremità del compromesso
+> "probabile vs vario" di cui parlavamo fin da [Fase 1.3](#sec-1-3).
+
+**Questo è RonkLM v1**: un GPT completo, scritto interamente a mano — dal gradiente
+della cross-entropy al motore di autograd, dalla self-attention al positional
+embedding — senza una sola riga di PyTorch. Ogni numero che produce, sappiamo da dove
+viene.
+
+---
+
+<a name="sec-7-6"></a>
+## 7.6 Glossario Fase 7 / cosa arriva in Fase 8
+
+Nuovi termini:
+
+- **Positional embedding**: tabella appresa indicizzata dalla posizione, sommata al
+  token embedding per dare al modello il senso dell'ordine.
+- **Decoder-only / GPT**: transformer fatto di soli blocchi con maschera causale.
+- **Generazione autoregressiva**: produrre testo un token alla volta, rialimentando
+  l'output.
+- **Temperature**: fattore che rende il campionamento più conservativo (<1) o più vario
+  (>1).
+- **Top-k**: tenere solo i k caratteri più probabili prima di campionare.
+- **Limite di contesto**: la lunghezza massima di sequenza (= block_size), fissata dalla
+  tabella posizionale.
+- **Checkpoint**: file che salva pesi + vocabolario + config, autosufficiente.
+
+**In Fase 8** passeremo da "gira" a "gira bene e si usa": un training loop robusto (con
+learning-rate **schedule**: warmup + cosine decay), una **CLI** per addestrare e
+generare da riga di comando in modo riproducibile, e una serie di **esperimenti
+documentati** su come ogni iperparametro (profondità, contesto, temperature) cambia il
+risultato. È la chiusura del Percorso A.
+
+---
+
+*Fine del capitolo Fase 7.*

@@ -1340,14 +1340,21 @@ residual, pre-norm — ovvero: *perché le reti profonde si addestrano*.
 
 ---
 
-## ☐ Fase 7 — RonkLM: il GPT completo
+## ☑ Fase 7 — RonkLM: il GPT completo  ✅ COMPLETATA (2026-07-19)
+
+> **Esito**: `models/gpt.py` (`GPT`+`GPTConfig`, token+positional embedding, stack di
+> Block, ln finale, testa, save/load `.npz` autosufficiente) e `generate.py`
+> (temperature/top-k). 8 test GPT (74 totali). **RonkLM v1** addestrato (3 layer, 4
+> teste, n_embd 64, block 32, ~160k param, 3000 step): **NLL val 1.632 < MLP 1.897 <
+> bigram 2.346** (milestone M4 ✓). Testo con parole vere, nome "Pinocchio", struttura
+> dialoghi. Branch `v2.0.0`.
 
 **Obiettivo didattico.** Assemblare tutto in un decoder-only funzionante, colmando
 l'ultimo buco concettuale (l'attention non sa *dove* sono i token: serve la
 posizione) e costruendo la generazione autoregressiva con i suoi controlli
 (temperature, top-k).
 
-### ☐ 7.1 — L'architettura (`gpt.py`)
+### ☑ 7.1 — L'architettura (`gpt.py`)
 
 **Cosa**:
 
@@ -1384,7 +1391,7 @@ tutti i residual accumulati, su scala non controllata; la testa che produce i
 logits lavora molto meglio su un segnale rinormalizzato. (Standard GPT-2,
 coerente con la logica pre-norm.)
 
-### ☐ 7.2 — Forward + loss su tutte le posizioni
+### ☑ 7.2 — Forward + loss su tutte le posizioni
 
 **Cosa**: il forward restituisce logits `(B,T,vocab)`; la cross-entropy si calcola
 su **tutte** le B·T predizioni contemporaneamente (reshape a `(B·T, vocab)` contro
@@ -1397,7 +1404,7 @@ target `(B·T,)`).
 forward/backward. Senza questa struttura, il training dei transformer non sarebbe
 economicamente possibile.
 
-### ☐ 7.3 — La generazione (`generate.py`): temperature e top-k
+### ☑ 7.3 — La generazione (`generate.py`): temperature e top-k
 
 **Cosa**: loop autoregressivo — encode del prompt; finché servono caratteri:
 forward sugli ultimi `block_size` token, prendi i logits *dell'ultima posizione*,
@@ -1424,7 +1431,7 @@ distribuzione su cui il modello è stato addestrato). Top-k taglia la coda:
 tieni i k logits migliori, azzera (a −inf) gli altri, rinormalizza. Insieme,
 `temperature` e `top-k` sono le stesse due manopole dei LLM di produzione.
 
-### ☐ 7.4 — Salvataggio e caricamento
+### ☑ 7.4 — Salvataggio e caricamento
 
 **Cosa**: `save`/`load` con `np.savez` (un archivio con tutti i parametri
 nominati) + il vocabolario del tokenizer + la config del modello, in un unico
@@ -1437,7 +1444,7 @@ di indici — vedi 0.3); una config diversa non fa nemmeno combaciare le shape. 
 checkpoint deve essere *autosufficiente*: pesi + mappa + architettura, sempre
 insieme.
 
-### ☐ 7.5 — Primo training end-to-end
+### ☑ 7.5 — Primo training end-to-end
 
 **Cosa**: training completo su Pinocchio, tabella NLL aggiornata (bigram → MLP →
 GPT), campioni generati a più temperature, salvataggio del primo checkpoint
@@ -1846,7 +1853,7 @@ un'architettura di cui possediamo ogni derivata. Fine del Percorso B.
 | M1 — Dati & intuizione | 0–2 | Bigram neurale converge alla NLL del bigram contato (±0.01); gradient check ok |
 | M2 — Motore | 3–4 | `test_autograd.py` verde su ogni op; NLL(MLP) < NLL(bigram) su val |
 | M3 — Attenzione ✅ | 5–6 | Blocco transformer con gradient check ok e gradienti presenti su tutti i parametri |
-| M4 — GPT (NumPy) | 7 | NLL(GPT) < NLL(MLP) su val; generazione con temperature/top-k; checkpoint autosufficiente |
+| M4 — GPT (NumPy) ✅ | 7 | NLL(GPT) < NLL(MLP) su val; generazione con temperature/top-k; checkpoint autosufficiente |
 | M5 — Prodotto A | 8 | Training da CLI riproducibile; tabella esperimenti; atlante verificato meccanicamente |
 | **M6 — Equivalenza** | 9 | `test_equivalence.py` verde: torch e NumPy danno stessi logits/gradienti/loss entro tolleranza |
 | **M7 — BPE + dati** | 10–11 | BPE round-trip ok su italiano; 1–2 mld di token puliti, deduplicati, binarizzati |
