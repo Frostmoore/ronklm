@@ -94,8 +94,16 @@ def evaluate(model, ds: BinDataset, cfg: TrainConfig, n_batches: int) -> float:
     return tot / n_batches
 
 
-def train(model, cfg: TrainConfig, device: str = "cuda") -> dict:
-    """Addestra il modello. Ritorna un riepilogo con la miglior loss di validation."""
+def train(model, cfg: TrainConfig, device: str = "cuda",
+          start_step: int = 0, resume_path: Path | None = None) -> dict:
+    """Addestra il modello. Ritorna un riepilogo con la miglior loss di validation.
+
+    Ripresa (lezione del blackout): ora salviamo `last.pt` a ogni eval con lo stato
+    COMPLETO -- pesi, ottimizzatore (i momenti di AdamW!), passo corrente e stato del
+    generatore casuale -- cosi' un'interruzione si riprende ESATTAMENTE da dov'era. Se
+    `resume_path` punta a un last.pt valido, ricarichiamo tutto e continuiamo.
+    (`best.pt` resta solo-pesi, per inferenza e continued-pretraining.)
+    """
     cfg.out_dir.mkdir(parents=True, exist_ok=True)
     torch.manual_seed(cfg.seed)
     torch.backends.cuda.matmul.allow_tf32 = True
@@ -126,13 +134,38 @@ def train(model, cfg: TrainConfig, device: str = "cuda") -> dict:
 
     rng = np.random.default_rng(cfg.seed)
     best_val = float("inf")
+
+    # Warm-restart da soli pesi (start_step>0, es. dopo un blackout senza optimizer):
+    # se in out_dir c'e' gia' un best.pt, EREDITIAMO il suo best_val, cosi' il primo
+    # eval "a freddo" -- che puo' essere temporaneamente peggiore per la perdita dei
+    # momenti di Adam -- non sovrascrive un checkpoint migliore col suo scossone.
+    if start_step > 0 and resume_path is None:
+        prev_best = cfg.out_dir / "best.pt"
+        if prev_best.exists():
+            try:
+                best_val = torch.load(prev_best, map_location="cpu", weights_only=False).get("val", float("inf"))
+                print(f"[warm-restart] eredito best_val={best_val:.4f} dal best.pt esistente")
+            except Exception:
+                pass
+
+    # --- ripresa completa (crash recovery) --------------------------------
+    if resume_path is not None and Path(resume_path).exists():
+        ck = torch.load(resume_path, map_location=device, weights_only=False)
+        model.load_state_dict(ck["model"])
+        opt.load_state_dict(ck["optim"])              # ripristina i momenti di AdamW
+        start_step = ck["step"] + 1
+        best_val = ck.get("best_val", float("inf"))
+        rng.bit_generator.state = ck["rng"]           # stessa sequenza di batch
+        print(f"[ripresa] da {resume_path} allo step {start_step} (best val {best_val:.4f})")
+
     t0 = time.time()
     log_path = cfg.out_dir / "training_log.csv"
-    log_path.write_text("step,lr,train_loss,val_loss,tok_s,vram_gb\n", encoding="utf-8")
+    if start_step == 0:
+        log_path.write_text("step,lr,train_loss,val_loss,tok_s,vram_gb\n", encoding="utf-8")
     warned_spill = False
     ref_tok_s = None
 
-    for step in range(cfg.steps):
+    for step in range(start_step, cfg.steps):
         lr = cosine_lr(step, cfg)
         for g in opt.param_groups:
             g["lr"] = lr
@@ -179,6 +212,13 @@ def train(model, cfg: TrainConfig, device: str = "cuda") -> dict:
                 torch.save({"model": model.state_dict(), "config": model.config,
                             "step": step, "val": val}, cfg.out_dir / "best.pt")
                 tag = "  <- best"
+            # stato COMPLETO per la ripresa: scritto su file temporaneo e poi rinominato,
+            # cosi' un blackout a meta' salvataggio non corrompe l'ultimo checkpoint buono.
+            tmp = cfg.out_dir / "last.tmp"
+            torch.save({"model": model.state_dict(), "optim": opt.state_dict(),
+                        "config": model.config, "step": step, "val": val,
+                        "best_val": best_val, "rng": rng.bit_generator.state}, tmp)
+            tmp.replace(cfg.out_dir / "last.pt")
             el = (time.time() - t0) / 60
             print(f"step {step:6d}  lr {lr:.2e}  train {loss_sum:.4f}  val {val:.4f}  "
                   f"{tok_s:7,.0f} tok/s  {vram:4.1f}GB  {el:5.1f}min{tag}", flush=True)

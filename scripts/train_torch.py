@@ -66,7 +66,8 @@ def cmd_train(args: argparse.Namespace) -> None:
         eval_every=args.eval_every,
         compile=args.compile,
     )
-    res = train(model, tcfg)
+    resume_path = (args.out / "last.pt") if args.resume else None
+    res = train(model, tcfg, start_step=args.start_step, resume_path=resume_path)
     print(f"\n[fine] miglior val loss {res['best_val']:.4f} in {res['minutes']:.1f} min")
     print(f"       checkpoint: {args.out / 'best.pt'}")
 
@@ -113,7 +114,11 @@ def build_parser() -> argparse.ArgumentParser:
     t.add_argument("--eval-every", type=int, default=500)
     t.add_argument("--compile", action="store_true")
     t.add_argument("--init-from", type=Path, default=None,
-                   help="checkpoint da cui partire (continued pretraining)")
+                   help="checkpoint da cui prendere i SOLI pesi (continued pretraining)")
+    t.add_argument("--resume", action="store_true",
+                   help="riprendi lo stato COMPLETO da <out>/last.pt (ottimizzatore, step, rng)")
+    t.add_argument("--start-step", type=int, default=0,
+                   help="passo da cui far ripartire lo scheduler (warm-restart da soli pesi)")
     t.set_defaults(func=cmd_train)
 
     g = sub.add_parser("generate", help="genera testo")

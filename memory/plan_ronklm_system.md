@@ -1826,7 +1826,27 @@ della Fase 1.1 ha finalmente il suo avversario alla giusta scala.
 
 ---
 
-## ☐ Fase 12 — RonkLM-150M: architettura, training run, valutazione
+## ◐ Fase 12 — RonkLM-1 (0.05b) pilota FATTO · RonkGPT-2 (0.15b) da fare
+
+> **Nomenclatura (utente)**: **RonkLM-1** = pilota ~0,05b (50M); **RonkGPT-2** =
+> modello grande ~0,15b (150M), l'obiettivo M8.
+>
+> **Esito pilota RonkLM-1** (2026-07-20): GPT-torch 10 layer/8 teste/embd 512/block
+> 512 = **48,6M param**, addestrato su Wikipedia IT (1,1 mld token) a ~196k tok/s,
+> 6,7 GB VRAM. Val loss 9,88→2,93 (in ~1h30). Scrive italiano grammaticalmente
+> corretto ma inventa i fatti (atteso). **Blackout a step 16k**: ripresa robusta
+> aggiunta (`last.pt` con stato completo, salvataggio atomico, warm-restart che
+> eredita best_val). Il continued-pretrain su Gutenberg lo trasformera' nel
+> narratore.
+>
+> **Direzione storyteller** (scelta utente): il modello deve rispondere "da
+> storiella". Corpus Gutenberg IT estratto (1.081 libri, 100,9M token), mix
+> Gutenberg-dominante 80/20 pronto, continued-pretraining implementato (`--init-from`).
+>
+> **RonkGPT-2 (0.15b) = M8, da fare**: run vero da ~150M su Wikipedia+Gutenberg,
+> ~8h sulla 4080 Super ("lancia e vai a dormire"). Il pilota ha validato la pipeline.
+
+### (architettura originariamente prevista per il modello grande)
 
 **Obiettivo didattico e traguardo del Percorso B.** Dimensionare, addestrare e
 valutare il modello base da ~150M. Qui si raccoglie tutto: l'architettura della Fase 7,

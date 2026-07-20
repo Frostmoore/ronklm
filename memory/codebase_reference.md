@@ -43,8 +43,10 @@
 | Scaricare Wikipedia IT (Kiwix) | [`data/corpus_b/download_wikipedia.py`](../data/corpus_b/download_wikipedia.py) |
 | Estrarre/pulire il corpus da ZIM | [`data/corpus_b/extract_wikipedia.py`](../data/corpus_b/extract_wikipedia.py) |
 | Addestrare BPE + tokenizzare in binario | [`data/corpus_b/tokenize_corpus.py`](../data/corpus_b/tokenize_corpus.py) |
-| Training su GPU (Fase 12) | [`ronklm_torch/train.py`](../ronklm_torch/train.py) — `train()`, `BinDataset` |
-| CLI training/generazione GPU | [`scripts/train_torch.py`](../scripts/train_torch.py) |
+| Estrarre libri Gutenberg (EPUB) | [`data/corpus_b/extract_gutenberg.py`](../data/corpus_b/extract_gutenberg.py) |
+| Costruire il mix narratore (Gutenberg-dominante) | [`data/corpus_b/build_storyteller_mix.py`](../data/corpus_b/build_storyteller_mix.py) |
+| Training su GPU + ripresa (Fase 12) | [`ronklm_torch/train.py`](../ronklm_torch/train.py) — `train()`, `BinDataset`, `cosine_lr` |
+| CLI training/generazione GPU | [`scripts/train_torch.py`](../scripts/train_torch.py) — `--init-from`/`--resume`/`--start-step` |
 | Eseguire tutti i test | `python run_tests.py` (radice) |
 | Runner di test senza pytest | [`tests/_runner.py`](../tests/_runner.py) |
 | Versione del pacchetto | `__version__` in [`ronklm/__init__.py`](../ronklm/__init__.py) |
@@ -60,10 +62,12 @@ RonkLM/
 │   ├── prepare_corpus.py      # [A] download + pulizia -> data/input.txt
 │   ├── input.txt              # [GENERATO, committato] corpus Pinocchio, 240.920 char
 │   ├── pinocchio_raw.txt      # [GENERATO, gitignored] cache download grezzo
-│   └── corpus_b/              # [B] pipeline del corpus grande (Fase 11)
+│   └── corpus_b/              # [B] pipeline del corpus grande (Fasi 11-12)
 │       ├── download_wikipedia.py   # ZIM da Kiwix, con mirror e ripresa
 │       ├── extract_wikipedia.py    # ZIM -> testo pulito (filtri, dedup, parallelo)
-│       └── tokenize_corpus.py      # BPE + tokenizzazione in uint16 (streaming)
+│       ├── extract_gutenberg.py    # libri EPUB -> testo (boilerplate PG)
+│       ├── tokenize_corpus.py      # BPE + tokenizzazione in uint16 (streaming)
+│       └── build_storyteller_mix.py  # mix Gutenberg-dominante per il narratore
 ├── ronklm/
 │   ├── __init__.py            # docstring pacchetto + __version__
 │   ├── tokenizer.py           # CharTokenizer
@@ -124,9 +128,10 @@ dimostrata e benchmark (F9, due varianti di attention); il **BPE byte-level** (F
 con CLI (F12).
 
 > **Dati fuori dal repo**: il corpus del Percorso B vive in `D:/RonkLM_corpus/`
-> (NVMe, non versionato): `wikipedia_it_all_nopic_2026-05.zim` (8,29 GB), `text/`
-> (28 shard, 4,14 GB), `tokens/` (`train.bin` 2,25 GB, `val.bin`, `bpe_16384.pkl`),
-> `run50m/` (checkpoint + `training_log.csv`).
+> (NVMe, non versionato): ZIM Wikipedia (8,29 GB) e Gutenberg (1 GB), `text/` (Wikipedia,
+> 4,14 GB) e `text_gutenberg/` (317 MB, 1.081 libri), `tokens/` (`train.bin` 2,25 GB /
+> `val.bin` / `gutenberg.bin` 100,9M / `bpe_16384.pkl`), `tokens_story/` (mix narratore,
+> 123,9M), `run50m/` (RonkLM-1: `best.pt` pesi + `last.pt` stato completo + log CSV).
 
 ---
 
@@ -480,7 +485,24 @@ caratteri/token** sull'italiano.
 | `cosine_lr` | `(step, cfg) -> float` | warmup + cosine decay |
 | `BinDataset` | `(path, block_size, device)`, `.batch(batch_size, rng)` | legge i token via `np.memmap`; `Y` = `X` shiftato di 1 |
 | `evaluate` | `(model, ds, cfg, n_batches) -> float` | NLL media su batch fissi |
-| `train` | `(model, cfg, device='cuda') -> dict` | loop con bf16 autocast, gradient accumulation, clipping, best-checkpoint, log CSV, **guardia anti-spilling** |
+| `train` | `(model, cfg, device='cuda', start_step=0, resume_path=None) -> dict` | loop con bf16 autocast, grad accumulation, clipping, best-checkpoint, log CSV, **guardia anti-spilling**; salva `last.pt` (stato completo: pesi+ottimizzatore+step+rng, scrittura atomica) per la ripresa |
+
+**Ripresa dopo interruzione** (lezione del blackout): `--resume` ricarica `last.pt`
+(stato completo → ripresa esatta); `--init-from CKPT --start-step N` fa un warm-restart
+dai soli pesi (l'ottimizzatore riparte a freddo — usato quando manca `last.pt`). Un
+warm-restart eredita il `best_val` esistente per non sovrascrivere un checkpoint migliore.
+
+`scripts/train_torch.py` (Fase 12): sottocomandi `train` (con `--init-from`, `--resume`,
+`--start-step`, oltre a tokens/bpe/out/n-layer/head/embd/block/micro-batch/grad-accum/
+steps/lr/warmup) e `generate` (ckpt, prompt, n, temperature, top-k).
+
+`data/corpus_b/extract_gutenberg.py`: estrae i libri EPUB dallo ZIM Gutenberg IT (1.081
+libri → ~100M token). Pulizia del boilerplate PG (header ricorrente, crediti, licenza,
+footer di pagina): residui da 2062 a 7.
+
+`data/corpus_b/build_storyteller_mix.py`: costruisce il corpus per il continued
+pretraining "narratore" — Gutenberg 80% + Wikipedia 20% (replay), blocchi mescolati,
+val di solo Gutenberg → 123,9M token in `tokens_story/`.
 
 ### 3.20 `scripts/train_torch.py` — CLI GPU
 

@@ -131,6 +131,13 @@
   - [11.1 Guardare i dati: tre bug trovati a occhio](#sec-11-1)
   - [11.2 I filtri di qualità e perché sono severi](#sec-11-2)
   - [11.3 Binarizzazione e memmap](#sec-11-3)
+- [Fase 12 — RonkLM-1 (0.05b): il training su GPU](#fase-12)
+  - [12.0 Il salto: da RonkLM v1 a RonkLM-1](#sec-12-0)
+  - [12.1 Il training loop per la GPU: bf16, accumulo, memmap](#sec-12-1)
+  - [12.2 Cosa scrive, e la diagnosi delle risate](#sec-12-2)
+  - [12.3 Il narratore: continued-pretraining su Gutenberg](#sec-12-3)
+  - [12.4 Le lezioni del blackout](#sec-12-4)
+  - [12.5 Saturazione e leggi di scala: perché arriva RonkGPT-2](#sec-12-5)
 
 ---
 
@@ -3833,3 +3840,217 @@ l'addestramento.
 ---
 
 *Fine dei capitoli Fasi 10 e 11.*
+
+---
+
+<a name="fase-12"></a>
+# Fase 12 — RonkLM-1 (0.05b): il training su GPU
+
+Ci siamo: mettiamo insieme il port PyTorch (Fase 9), il BPE (Fase 10) e il corpus da
+1,1 miliardi di token (Fase 11), e addestriamo un vero modello da **~48 milioni di
+parametri** sulla RTX 4080 Super. È **RonkLM-1** (nome scherzoso, sulla falsariga di
+GPT-1/GPT-2; "0.05b" = 0,05 miliardi di parametri).
+
+📁 File: [`ronklm_torch/train.py`](ronklm_torch/train.py),
+[`scripts/train_torch.py`](scripts/train_torch.py)
+
+---
+
+<a name="sec-12-0"></a>
+## 12.0 Il salto: da RonkLM v1 a RonkLM-1
+
+Ricordi RonkLM v1 (Fase 7)? 160.000 parametri, char-level, addestrato su Pinocchio,
+generava *"lona s... de filì; — bi E griede"*. RonkLM-1 è **300 volte più grande**,
+usa il BPE, ed è addestrato su tutta Wikipedia italiana. Il salto di qualità è
+categorico: dopo pochi minuti già scrive **frasi italiane grammaticalmente corrette**.
+Ma la macchina che impara è *identica* — è sempre il ciclo forward → loss → backward →
+update della [Fase 2.4](#sec-2-4), solo su una funzione più grande e su una GPU.
+
+---
+
+<a name="sec-12-1"></a>
+## 12.1 Il training loop per la GPU: bf16, accumulo, memmap
+
+Il loop di [`ronklm_torch/train.py`](ronklm_torch/train.py) riprende quello della Fase
+8 (warmup+cosine, eval mediata, best-checkpoint, grad clipping) e aggiunge tre tecniche
+per la scala vera. Le abbiamo già incontrate concettualmente; qui diventano codice.
+
+> **📖 Mixed precision (bf16).** I calcoli pesanti si fanno in 16 bit (i tensor core
+> della GPU li macinano a velocità multiple), tenendo i pesi master in 32 bit. Nel
+> codice è un `with torch.autocast("cuda", dtype=torch.bfloat16):` attorno al forward.
+
+> **📖 Gradient accumulation.** Il batch "giusto" (~0,5M token) non entra nei 16 GB. Si
+> sommano i gradienti di più micro-batch prima di aggiornare: matematicamente identico
+> a un batch grande, memoria costante. Funziona *perché il backward della somma
+> distribuisce il gradiente* — la proprietà della [Fase 3.3](#sec-3-3), terza volta che
+> ci torna utile.
+
+> **📖 `np.memmap`.** Il file dei token (2,2 GB) resta su disco; il sistema operativo
+> porta in RAM solo le finestre lette. Il training parte in un istante e usa memoria
+> costante. La classe `BinDataset` estrae batch `(X, Y)` con `Y = X` spostato di 1 — il
+> trucco della [Fase 0.8](#sec-0-8), a scala miliardaria.
+
+E c'è la **guardia anti-spilling** (la lezione della [sezione 9.5](#sec-9-5)): il loop
+controlla la VRAM e il throughput, e avvisa se qualcosa sta traboccando in RAM — così un
+degrado silenzioso non ci fa girare 8 ore a un decimo della velocità senza accorgercene.
+
+**I numeri reali di RonkLM-1** (10 layer, 8 teste, n_embd 512, block 512, ~48,6M param):
+
+```
+throughput:  ~196.000 token/s   (bf16, batch fisico 32 x accum 4)
+VRAM:        6,7 GB su 16
+val loss:    9,88 (inizio) -> 4,47 (1k passi) -> 3,07 (10k) -> 2,95 (16k)
+```
+
+Un dettaglio istruttivo dal log: a un certo punto la loss di *train* (2,95) era **più
+alta** di quella di *validation* (2,93). Sembra un errore, non lo è: la train è la loss
+di *un solo batch rumoroso*, la val è mediata su 40 batch. Le decisioni si prendono
+sulla val mediata, mai sul singolo batch ([Fase 8.2](#sec-8-2)).
+
+---
+
+<a name="sec-12-2"></a>
+## 12.2 Cosa scrive, e la diagnosi delle risate
+
+RonkLM-1 è, letteralmente, esilarante — e ogni risata ha un nome tecnico. Alcuni esempi
+reali, col prompt in **grassetto**:
+
+> **L'Italia è** una posizione strategicamente più sicura del paese, che è quella di
+> Lecco. […] fondata nel 1214 dal padre di Carlo di Borbone e dall'altro, il padre di
+> Caterina da Vinci.
+
+> **Benito Mussolini è** «non è vero che il codice è per legge di fatto un valido testo,
+> ma per legge di fatto un testo normativo. […] il codice può essere emesso da un codice
+> senza legge di uno stesso codice».
+
+Tre fenomeni, tutti diagnosticabili:
+
+> **📖 Allucinazione confidente.** "Caterina da Vinci", "il matematico William Dawson,
+> 1757": inventati con assoluta sicurezza. È il tetto di capacità della [sezione
+> 12.5](#sec-12-5): 48M parametri non hanno spazio per immagazzinare i *fatti*, solo per
+> la grammatica. Parla benissimo del nulla.
+
+> **📖 Loop degenerativo (l'attrattore).** "codice" ripetuto 20 volte: a temperature
+> bassa, entrato in una zona di alta confidenza, il modello ricade sempre sulla stessa
+> scelta; e l'attention, *vedendo* tutti quei "codice" nel contesto, ne genera ancora.
+> Si auto-alimenta. È il campionamento greedy degenere della [Fase 1.3](#sec-1-3),
+> innescato da un prompt fuori distribuzione (`Mussolini è` + doppio spazio). Alzando la
+> temperature a 1.0 il loop scompare.
+
+> **📖 La deriva tematica.** "L'Italia" → Lecco → fiume Ticino → Borbone: ogni frase è
+> localmente sensata ma il filo si perde in poche righe. È il limite di coerenza a lunga
+> distanza di un modello piccolo.
+
+**La morale onesta:** RonkLM-1 ha una grammatica quasi perfetta e zero conoscenza
+affidabile. È esattamente ciò che ci si aspetta a questa scala — e vederlo *dal vivo*,
+su un modello di cui possediamo ogni riga, vale più di mille spiegazioni.
+
+---
+
+<a name="sec-12-3"></a>
+## 12.3 Il narratore: continued-pretraining su Gutenberg
+
+C'è una svolta di prodotto elegante. RonkLM-1 su Wikipedia *inventa i fatti* — un bug
+fatale per un'enciclopedia. Ma se cambiamo obiettivo e vogliamo un **narratore**,
+l'invenzione diventa una **feature**: una storia non deve essere vera, deve essere
+coerente e ben raccontata — cioè esattamente ciò in cui il modello è già bravo.
+
+Per spostare il *registro* da enciclopedico a narrativo, usiamo il **continued
+pretraining**: si parte dai pesi del modello Wikipedia (che *sa* qualcosa) e si continua
+l'addestramento su un corpus **Gutenberg-dominante** (romanzi e novelle italiane, 80%)
+con una spruzzata di Wikipedia (20%, come "replay" per non dimenticare del tutto).
+
+> **📖 Perché funziona.** L'addestramento *recente* domina la distribuzione di output
+> del modello: dopo un po' di dati Gutenberg-pesanti, lo stile vira al narrativo pur
+> partendo da una base enciclopedica. È una tecnica standard (domain-adaptive continued
+> pretraining), e dà un risultato migliore che addestrare da zero sul solo Gutenberg —
+> perché 100M token sono pochi per un modello da zero, ma bastano per *ri-orientare* un
+> modello già formato.
+
+> **📖 Il tetto delle epoche.** Gutenberg ha ~100M token *unici*. Ripeterli troppe volte
+> (oltre ~4 epoche) fa **memorizzare** i libri invece di imparare a raccontare — il
+> modello ri-sputerebbe Collodi parola per parola. Per questo il "dominante" è capato a
+> poche epoche, non "solo Gutenberg all'infinito".
+
+> **📖 La validation misura il bersaglio.** La val del narratore è di *solo Gutenberg*:
+> così la loss misura quanto il modello è bravo nel registro-obiettivo (il narrativo),
+> non nell'enciclopedico che stiamo abbandonando.
+
+---
+
+<a name="sec-12-4"></a>
+## 12.4 Le lezioni del blackout
+
+A metà del training (step 16.000/32.000) **è saltata la corrente**. È stato uno dei
+momenti più istruttivi del progetto, perché ha messo alla prova la robustezza e ha
+insegnato tre cose concrete.
+
+**Lezione 1 — Salva l'ottimizzatore, non solo i pesi.** Il nostro checkpoint salvava
+solo i *pesi*. Riprendendo, Adam è ripartito "da fermo" (momenti azzerati): per qualche
+migliaio di passi gli aggiornamenti sono stati rumorosi, e — cosa che ci ha sorpresi —
+la **qualità di generazione è calata** (sintassi più rozza: *"per la patate di mais"*)
+anche se la val loss si era già ripresa. Ora `last.pt` salva lo stato **completo** —
+pesi, momenti di AdamW, passo, stato del generatore casuale — e una ripresa è a costo
+zero.
+
+> **🔧 Il salvataggio atomico.** `last.pt` si scrive su un file temporaneo e poi si
+> *rinomina*: così un blackout *durante il salvataggio* non corrompe l'ultimo checkpoint
+> buono. La rinomina è un'operazione atomica del filesystem — o è avvenuta o no, mai a
+> metà.
+
+**Lezione 2 — La val loss non è la qualità di generazione.** La val loss è una *media*
+su tantissimi token. Un modello può avere una media ottima e generare male: basta che
+ogni tanto assegni alta probabilità a un token che *rompe la fluidità* (un "la" prima di
+"patate") per rovinare la frase, senza spostare quasi la media. Ecco perché nel mondo
+vero si usano *anche* valutazioni umane, non solo la loss. Il blackout ce l'ha mostrato:
+val 2,93 (ottima) ma sintassi visibilmente peggiorata.
+
+**Lezione 3 — I warm-restart hanno un transitorio, e vanno protetti.** Riprendendo, il
+nostro `best_val` ripartiva da infinito, così il primo eval "a freddo" (peggiore per la
+perdita dei momenti) sovrascriveva il *buon* `best.pt` col suo scossone. Corretto: un
+warm-restart ora **eredita** il `best_val` esistente e non si auto-sabota.
+
+> **La nota che consola:** il narratore parte comunque da capo (continued pretraining),
+> quindi **ri-ottimizza** la struttura fine che il blackout aveva scosso — su prosa
+> letteraria, per giunta più pulita di Wikipedia. In pratica il blackout ha graffiato un
+> modello che stavamo già per ridipingere.
+
+---
+
+<a name="sec-12-5"></a>
+## 12.5 Saturazione e leggi di scala: perché arriva RonkGPT-2
+
+Osservando la curva, la loss **si appiattisce**: da 1k a 5k passi ha guadagnato 1,2, da
+5k a 10k solo 0,19. Questo *non* vuol dire "ha finito di imparare" — vuol dire che sta
+sbattendo contro il **tetto di capacità** di 48M parametri.
+
+> **📖 La loss ha un pavimento.** `loss = entropia irriducibile del linguaggio + errore
+> del modello`. Il primo pezzo non si abbatte (il prossimo token è genuinamente
+> incerto). Il training uccide in fretta l'errore *facile* (grammatica, frequenze) — il
+> crollo iniziale — e poi resta solo la parte *difficile* (coerenza, conoscenza), che
+> costa cara.
+
+> **📖 Le leggi di potenza.** La loss scende come `compute^(−α)` (Kaplan/Chinchilla):
+> ogni *raddoppio* di calcolo compra una fetta di loss sempre più piccola. La
+> "saturazione" è la coda della legge di potenza: servono quantità *esponenziali* per
+> guadagni *lineari*. Il nostro 48M su 1,1 mld di token è ~ottimale-Chinchilla (22
+> token/parametro): abbiamo spremuto quasi tutto ciò che *questa taglia* può da *questo
+> calcolo*.
+
+Per andare oltre servono **più parametri E più dati insieme**. È da qui che nascerà
+**RonkGPT-2 (0.15b)** — ~150M parametri, l'obiettivo M8 del piano. RonkLM-1 non è
+sprecato: era il **run pilota** che il piano (Fase 12.2) prevedeva proprio per validare
+tutta la pipeline — BPE, corpus, training, ripresa, generazione — *prima* di impegnare
+le ~8 ore del modello grande. E l'ha validata alla perfezione, blackout compreso.
+
+| | RonkLM-1 (0.05b) | RonkGPT-2 (0.15b) |
+|---|---|---|
+| Parametri | 48,6M | ~150M |
+| Coerenza / loop | discreta / frequenti | migliore / molto meno |
+| "Sa" cose | quasi niente | qualcosa di reale |
+| Training sulla 4080 | ~1,5h | ~8h (misurato in 9.3) |
+| VRAM | 6,7 GB | ~12,7 GB |
+
+---
+
+*Fine del capitolo Fase 12.*
