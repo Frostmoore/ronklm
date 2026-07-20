@@ -116,8 +116,9 @@
   - [9.2 La trappola della trasposizione](#sec-9-2)
   - [9.3 La prova di equivalenza: i numeri](#sec-9-3)
   - [9.4 Il benchmark: quanto costa capire](#sec-9-4)
-  - [9.5 Mixed precision e GPU: cosa cambia davvero](#sec-9-5)
-  - [9.6 Glossario Fase 9 / cosa arriva in Fase 10](#sec-9-6)
+  - [9.5 Anatomia della memoria: dove finiscono 43 GB](#sec-9-5)
+  - [9.6 Mixed precision e GPU: cosa cambia davvero](#sec-9-6)
+  - [9.7 Glossario Fase 9 / cosa arriva in Fase 10](#sec-9-7)
 
 ---
 
@@ -3307,7 +3308,150 @@ regge: **il 150M è addestrabile sulla 4080 Super nel budget previsto.**
 ---
 
 <a name="sec-9-5"></a>
-## 9.5 Mixed precision e GPU: cosa cambia davvero
+## 9.5 Anatomia della memoria: dove finiscono 43 GB
+
+Durante i benchmark è successa una cosa che vale un capitolo a sé: il Task Manager
+mostrava la **memoria di sistema all'88%** (56 su 63,6 GB), la memoria GPU dedicata
+esaurita e quella "condivisa" in uso. Su una macchina con 16 GB di VRAM che sta
+addestrando un modello da 134M. Capire *perché* spiega tre cose insieme: come funziona
+la memoria di una GPU, perché le prestazioni sono crollate, e qual è il tetto operativo
+per la Fase 12.
+
+### 9.5.1 Memoria "dedicata" e "condivisa": il meccanismo di Windows
+
+> **📖 Concetto.** Windows presenta due voci di memoria per la GPU:
+> - **dedicata** = la VRAM vera, fisicamente sulla scheda (16 GB sulla 4080 Super);
+> - **condivisa** = una quota della RAM di sistema (di solito la metà: 31,8 GB su
+>   63,6) che il sistema è disposto a *prestare* alla GPU.
+>
+> Quando un'allocazione CUDA non entra nella VRAM, il driver Windows (WDDM) **non
+> restituisce un errore**: sposta silenziosamente dei blocchi nella memoria condivisa,
+> cioè nella RAM di sistema, raggiungibile solo attraverso il bus PCIe.
+
+Ed ecco la spiegazione dell'88%: la RAM di sistema era occupata (a) dalle applicazioni
+normali della macchina — nel nostro caso ~23 GB tra browser, editor e vari — e (b) dai
+blocchi di memoria GPU traboccati. Somma: ~56 GB.
+
+> **⚠️ Perché questo comportamento è insidioso.** Su Linux, un'allocazione che non entra
+> in VRAM di solito produce un **errore netto** (`CUDA out of memory`): brutto ma
+> onesto, capisci subito. Su Windows ottieni invece un **degrado silenzioso**: il
+> programma continua a funzionare, i risultati sono corretti, ma la velocità crolla di
+> uno o due ordini di grandezza. Se non guardassi i token/s, penseresti che "la GPU è
+> lenta" e cercheresti la causa nel posto sbagliato.
+
+Ed è esattamente ciò che avevamo misurato:
+
+```
+variante didattica, batch 32:   29,4 GB richiesti  ->   1.904 tok/s   (traboccando)
+variante didattica, batch  8:    8,7 GB richiesti  ->  30.633 tok/s   (tutto in VRAM)
+```
+
+Lo stesso identico codice è **16× più lento** solo perché la memoria non ci sta.
+Il picco di RAM e il crollo di velocità **non sono due problemi: sono lo stesso
+problema**.
+
+> **Nota**: anche la variante *ottimizzata* traboccava a batch 48 (18,2 GB > 16 GB), e
+> infatti lì scendeva da 78.314 a 29.441 tok/s. Il fenomeno non dipende
+> dall'implementazione: dipende dallo sforare la VRAM.
+
+### 9.5.2 Dove va la memoria, voce per voce
+
+Contiamo. Configurazione: 134M parametri, 12 layer, 12 teste, `n_embd` 768,
+contesto T=512, vocabolario 32k, calcolo in bf16 (2 byte per numero).
+
+**Parte fissa** — non dipende dal batch:
+
+| Voce | Conto | Memoria |
+|---|---|---|
+| Pesi (copia master in fp32) | 134M × 4 byte | 537 MB |
+| Gradienti | 134M × 4 byte | 537 MB |
+| Stati di AdamW (`m` e `v`) | 2 × 134M × 4 byte | 1,07 GB |
+| | **subtotale** | **~2,1 GB** |
+
+Questi 2,1 GB ci sono sempre, anche con batch 1. È il "costo di esistere" del modello.
+
+**Parte variabile** — le *attivazioni* salvate durante il forward per poter fare il
+backward. Queste crescono col batch, ed è qui che si consuma tutto:
+
+| Voce | Conto (batch 32) | Memoria |
+|---|---|---|
+| **Matrici di attenzione** (versione ingenua) | 32 × 12 teste × 512² × 2 byte × ~2 tensori × 12 layer | **~4,8 GB** |
+| Attivazioni della FFN (espansione 4×) | 32 × 512 × 3072 × 2 byte × ~2 × 12 layer | ~2,4 GB |
+| Logit finali + intermedi della cross-entropy | 32 × 512 × 32.000 × 2 byte × ~2 | ~2,1 GB |
+| Flusso residuo e tensori vari per layer | 32 × 512 × 768 × 2 byte × (parecchi) × 12 | ~1–2 GB |
+
+A batch 48 tutte queste voci crescono di 1,5× e il totale arriva ai **43 GB** osservati.
+
+### 9.5.3 Il termine quadratico è il protagonista
+
+Guarda la prima riga della tabella: la memoria delle matrici di attenzione è
+
+```
+batch × n_teste × T² × n_layer
+```
+
+C'è un **T al quadrato**. È la conseguenza diretta di ciò che l'attention *fa*: per
+ogni posizione calcola un punteggio verso *ogni altra* posizione — una matrice T×T
+(la stessa che avevamo stampato come heatmap in [Fase 5.5](#sec-5-5), lì 15×15, qui
+512×512 per ognuna delle 144 combinazioni testa/layer).
+
+Le conseguenze pratiche sono brutali:
+
+| Contesto T | Memoria attention (relativa) |
+|---|---|
+| 256 | 1× |
+| 512 | **4×** |
+| 1024 | **16×** |
+| 2048 | **64×** |
+
+> **📖 Ecco perché il "contesto lungo" è il lusso costoso dei LLM.** Raddoppiare la
+> finestra di contesto non raddoppia il costo: lo **quadruplica**. È il motivo per cui i
+> modelli commerciali fanno pagare di più i contesti lunghi, per cui esistono decine di
+> ricerche per rendere l'attention sub-quadratica, e per cui la nostra scelta di T=512
+> per la Fase 12 non è timidezza ma aritmetica.
+
+### 9.5.4 Come FlashAttention fa sparire il termine T²
+
+`F.scaled_dot_product_attention` risolve il problema con due idee:
+
+1. **Tiling**: non calcola la matrice T×T tutta insieme. La elabora a **blocchi**
+   dentro la SRAM della GPU (la memoria piccolissima e velocissima vicino ai core),
+   accumulando il risultato. La matrice completa non esiste mai in memoria.
+2. **Ricalcolo nel backward**: invece di *salvare* la matrice di attenzione per il
+   passaggio all'indietro, la **ricalcola** al volo quando serve. È un baratto:
+   si spende un po' più di calcolo per non spendere memoria.
+
+Il risultato, misurato da noi:
+
+```
+batch 32, versione ingenua:      29,4 GB   ->   1.904 tok/s
+batch 32, con FlashAttention:    12,7 GB   ->  78.314 tok/s
+```
+
+Il termine quadratico sparisce dal conto della memoria, tutto resta dentro i 16 GB, e
+la velocità è quella vera della scheda.
+
+### 9.5.5 Cosa significa per la Fase 12
+
+Da questa analisi escono tre numeri operativi che useremo per il training del 150M:
+
+- **Batch 32 (12,7 GB) è il tetto comodo** sulla 4080 Super: lascia ~3 GB di margine
+  per la frammentazione e per il resto del sistema.
+- **Batch 48 (18,2 GB) va evitato**: trabocca, e le prestazioni si dimezzano e oltre.
+- **T=512 è la scelta giusta** per questo budget; se un domani volessimo T=1024,
+  a parità di VRAM dovremmo circa dimezzare il batch.
+
+E se servisse un batch *effettivo* più grande (a questa scala si usano ~0,5M token per
+update)? La risposta è la **gradient accumulation**, già prevista nel piano
+(Fase 12.2): si sommano i gradienti di più micro-batch prima di aggiornare i pesi.
+Matematicamente identico a un batch grande — perché il backward della somma distribuisce
+il gradiente, la stessa proprietà vista in [Fase 3.3](#sec-3-3) — ma con memoria
+costante. È così che si addestrano modelli enormi su schede piccole.
+
+---
+
+<a name="sec-9-6"></a>
+## 9.6 Mixed precision e GPU: cosa cambia davvero
 
 Due concetti che entrano ora nel progetto e che governeranno il training della Fase 12.
 
@@ -3332,8 +3476,8 @@ Due concetti che entrano ora nel progetto e che governeranno il training della F
 
 ---
 
-<a name="sec-9-6"></a>
-## 9.6 Glossario Fase 9 / cosa arriva in Fase 10
+<a name="sec-9-7"></a>
+## 9.7 Glossario Fase 9 / cosa arriva in Fase 10
 
 Nuovi termini:
 
@@ -3348,6 +3492,16 @@ Nuovi termini:
   precisione.
 - **`register_buffer`**: in PyTorch, un tensore che appartiene al modulo ma **non** è un
   parametro addestrabile (noi lo usiamo per la maschera causale).
+- **Memoria GPU dedicata / condivisa**: la VRAM sulla scheda / la quota di RAM di
+  sistema che Windows presta alla GPU quando la VRAM finisce.
+- **Spilling**: il traboccare delle allocazioni dalla VRAM alla RAM di sistema; non dà
+  errore ma fa crollare le prestazioni (accessi via PCIe).
+- **Attivazioni**: i tensori intermedi del forward che vanno *salvati* per poter
+  calcolare il backward; sono la voce di memoria che cresce col batch.
+- **Tiling**: elaborare una matrice a blocchi nella memoria veloce (SRAM) invece che
+  tutta insieme; è il trucco di FlashAttention.
+- **Gradient accumulation**: sommare i gradienti di più micro-batch prima di
+  aggiornare, per ottenere un batch effettivo grande a memoria costante.
 
 **In Fase 10** costruiremo il **tokenizer BPE, scritto a mano** — il pezzo che avevamo
 volutamente rimandato nel Percorso A ([sezione 0.3](#sec-0-3)). Adesso serve davvero: a

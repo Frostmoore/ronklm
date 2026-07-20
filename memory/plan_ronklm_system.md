@@ -1872,6 +1872,16 @@ errore scoperto all'ora 6 di un run da 8 ore costa 6 ore; nel pilota costa 10 mi
 per run, nessun cloud. Il benchmark 9.3 conferma i token/s effettivi e quindi quanti
 token totali (→ quante epoche sui ~1,5 mld unici) stanno nel budget.
 
+**Limiti operativi MISURATI in Fase 9.3** (da rispettare, non da riscoprire):
+- **`fast=True` obbligatorio** (`CausalSelfAttention`): la variante didattica satura la
+  VRAM e crolla (a batch 32: 29,4 GB → 1.904 tok/s contro 12,7 GB → 78.314 tok/s).
+- **batch 32 = tetto comodo** (12,7 GB su 16, ~3 GB di margine). **batch 48 (18,2 GB)
+  trabocca** nella memoria condivisa Windows: niente errore, ma prestazioni dimezzate.
+- **T=512** è coerente col budget: la memoria dell'attention cresce con **T²**, quindi
+  passare a 1024 imporrebbe di circa dimezzare il batch.
+- Per un batch *effettivo* più grande (~0,5M token/update) si usa la **gradient
+  accumulation**, non un batch fisico più grande.
+
 ### ☐ 12.3 — Valutazione e chiusura
 
 **Cosa**: (a) NLL/perplexity su val — nota metodologica: i numeri BPE **non sono
