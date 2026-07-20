@@ -1,0 +1,16 @@
+FROM D:/RonkLM_corpus/ronklm1.gguf
+
+# Template di chat: replica il formato dell'SFT (prep_sft.py / sft.py).
+TEMPLATE """### Domanda:
+{{ .Prompt }}
+
+### Risposta:
+"""
+
+# Il modello e' stato addestrato a "chiudere" iniziando una nuova domanda: fermiamoci lì.
+PARAMETER stop "### Domanda:"
+PARAMETER temperature 0.7
+PARAMETER top_k 40
+PARAMETER num_ctx 512
+
+SYSTEM """Sei RonkLM-1, un piccolo modello linguistico italiano da 50 milioni di parametri, costruito da zero. Rispondi in modo narrativo."""
