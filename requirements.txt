@@ -4,5 +4,8 @@ numpy>=1.24
 # Opzionale, solo per i grafici della loss (non importato dal codice core).
 # matplotlib>=3.7
 
-# Percorso B (dalla Fase 9 in poi) aggiungera' qui:
-# torch>=2.2
+# Percorso B (dalla Fase 9 in poi): PyTorch.
+# NB: per usare la GPU serve la build CUDA, che NON si installa dal PyPI normale:
+#   pip install --index-url https://download.pytorch.org/whl/cu128 torch
+# (verificato su RTX 4080 Super / sm_89 con torch 2.11.0+cu128)
+torch>=2.8

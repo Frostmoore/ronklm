@@ -110,6 +110,14 @@
   - [8.3 Il learning-rate schedule: warmup e cosine decay](#sec-8-3)
   - [8.4 Il laboratorio: cosa compra ogni iperparametro](#sec-8-4)
   - [8.5 Chiusura del Percorso A](#sec-8-5)
+- [Fase 9 — Il port a PyTorch, con equivalenza dimostrata](#fase-9)
+  - [9.0 Perché adesso, e perché non prima](#sec-9-0)
+  - [9.1 La tabella di corrispondenza: PyTorch non ha concetti nuovi](#sec-9-1)
+  - [9.2 La trappola della trasposizione](#sec-9-2)
+  - [9.3 La prova di equivalenza: i numeri](#sec-9-3)
+  - [9.4 Il benchmark: quanto costa capire](#sec-9-4)
+  - [9.5 Mixed precision e GPU: cosa cambia davvero](#sec-9-5)
+  - [9.6 Glossario Fase 9 / cosa arriva in Fase 10](#sec-9-6)
 
 ---
 
@@ -3056,3 +3064,297 @@ viaggio. Per ora, abbiamo fatto la cosa più importante: **capito**.
 ---
 
 *Fine del capitolo Fase 8 — e del Percorso A.*
+
+---
+
+<a name="fase-9"></a>
+# Fase 9 — Il port a PyTorch, con equivalenza dimostrata
+
+Apriamo il Percorso B. Riscriviamo RonkLM in PyTorch e — questo è il punto — **proviamo
+con dei numeri che i due motori dicono esattamente la stessa cosa**. Non è la fase in
+cui abbandoniamo il lavoro fatto: è la fase in cui il lavoro fatto diventa lo
+**strumento di verifica** di tutto ciò che verrà.
+
+📁 File: [`ronklm_torch/model.py`](ronklm_torch/model.py),
+[`tests/test_equivalence.py`](tests/test_equivalence.py),
+[`scripts/benchmark.py`](scripts/benchmark.py)
+
+---
+
+<a name="sec-9-0"></a>
+## 9.0 Perché adesso, e perché non prima
+
+Per tutto il Percorso A abbiamo *vietato* PyTorch. Ora lo introduciamo. Non è un
+cambio di idea: è il piano che si compie.
+
+> **📖 Il ragionamento.** Se avessimo iniziato con PyTorch, `loss.backward()` sarebbe
+> stato magia, `nn.MultiheadAttention` una scatola nera, `AdamW` una sigla. Avendo
+> invece scritto a mano il motore di autograd, l'attention e l'ottimizzatore, adesso
+> PyTorch non è più un framework misterioso: è **la versione veloce di cose che
+> possediamo**. Ogni sua API corrisponde a codice che abbiamo derivato e testato noi.
+
+E c'è un secondo motivo, pratico: **serve la GPU**. Il nostro motore NumPy gira su CPU,
+e (come calcolato in [I.2](#sec-i-2) del piano) addestrare ~150M parametri lì
+richiederebbe *anni*. PyTorch è il ponte verso la GPU, e quindi verso un modello che
+scrive italiano vero.
+
+---
+
+<a name="sec-9-1"></a>
+## 9.1 La tabella di corrispondenza: PyTorch non ha concetti nuovi
+
+Il vero contenuto didattico della fase è questa tabella, che sta anche in cima a
+[`ronklm_torch/__init__.py`](ronklm_torch/__init__.py):
+
+| Nostro (Percorso A) | PyTorch | Costruito in |
+|---|---|---|
+| `autograd.Tensor` con `.grad` | `torch.Tensor(requires_grad=True)` | Fase 3 |
+| `Tensor.backward()` (topo-sort) | `loss.backward()` | Fase 3 |
+| `nn.Module` + `parameters()` | `torch.nn.Module` | Fase 4 |
+| `nn.Linear` (`x @ W + b`) | `torch.nn.Linear` (`x @ W.T + b`) | Fase 4 |
+| `nn.Embedding` (`gather_rows`) | `torch.nn.Embedding` | Fase 4 |
+| `nn.LayerNorm` (mean/var a mano) | `torch.nn.LayerNorm` | Fase 6 |
+| `Tensor.gelu()` (composita) | `F.gelu(approximate='tanh')` | Fase 3/6 |
+| `autograd.cross_entropy` (fusa) | `F.cross_entropy` | Fase 3 |
+| `optim.AdamW` (scritto a mano) | `torch.optim.AdamW` | Fase 4 |
+
+> **Leggi la tabella da destra a sinistra**: per *ogni* pezzo di PyTorch che useremo,
+> esiste una riga del nostro codice che sappiamo spiegare. Non c'è **nessun concetto
+> nuovo** — solo ingegneria migliore: kernel scritti in C++/CUDA, operazioni fuse,
+> gestione della memoria. La differenza tra `ronkgrad` e PyTorch è *implementativa*,
+> non concettuale.
+
+Il codice del port è quasi noioso da leggere, ed è un ottimo segno: `Head`,
+`MultiHeadAttention`, `FeedForward`, `Block`, `GPT` hanno la stessa forma di prima,
+con le stesse costanti (`-1e9` per la maschera, `eps=1e-5` per LayerNorm, gelu in
+approssimazione tanh). Ogni dettaglio deve combaciare, altrimenti il test di
+equivalenza — che vedremo tra poco — se ne accorge.
+
+---
+
+<a name="sec-9-2"></a>
+## 9.2 La trappola della trasposizione
+
+C'è **una** differenza reale tra i due mondi, e vale la pena isolarla perché è il tipo
+di bug che rovina i port:
+
+```
+il NOSTRO Linear:      W ha forma (n_in, n_out),   calcola  x @ W + b
+il Linear di PyTorch:  weight ha forma (n_out, n_in), calcola x @ weight.T + b
+```
+
+Le due convenzioni sono equivalenti, ma **trasposte**. Quindi copiare i pesi da un
+modello all'altro richiede una trasposizione (`W.T`), e lo stesso vale quando
+confrontiamo i *gradienti*.
+
+> **⚠️ Perché è pericolosa.** Se sbagliassimo la trasposizione, il modello non
+> crasherebbe: le shape combacerebbero comunque (in una rete dove molte matrici sono
+> quadrate) o l'errore emergerebbe solo in certi punti. Otterremmo semplicemente un
+> modello che *impara peggio*, e passeremmo giorni a incolpare gli iperparametri. È
+> l'archetipo del bug che "non rompe niente di visibile" — la stessa famiglia del
+> gradiente sbagliato di [Fase 2.7](#sec-2-7). L'unica difesa è verificare
+> numericamente. Che è esattamente ciò che facciamo.
+
+---
+
+<a name="sec-9-3"></a>
+## 9.3 La prova di equivalenza: i numeri
+
+Il metodo: **stessi pesi** (copiati dal modello NumPy a quello torch), **stesso
+input**, e si confrontano tre cose. Per un confronto severo mettiamo anche il modello
+torch in `float64` (il nostro motore lavora in doppia precisione), così le differenze
+residue sono solo arrotondamenti nell'ultimo bit.
+
+Ecco i risultati reali:
+
+```
+FORWARD    max |logit_numpy − logit_torch|        = 1.8e-15
+LOSS       |loss_numpy − loss_torch|              = 4.4e-16
+BACKWARD   max |grad_numpy − grad_torch|          = 8.7e-17     (su tutti i 38 parametri)
+
+TRAINING (5 passi di AdamW, stessi batch):
+  step |        loss NumPy |        loss torch |  scarto
+    0  | 3.69110184804839 | 3.69110184804839 | 0.00e+00
+    1  | 3.64976273348430 | 3.64976273348430 | 0.00e+00
+    2  | 3.39537279493138 | 3.39537279493138 | 0.00e+00
+    3  | 3.65451616982575 | 3.65451616982575 | 4.44e-16
+    4  | 3.55488599279950 | 3.55488599279950 | 0.00e+00
+```
+
+Fermiamoci a capire **cosa significa**. `1e-15` non è "molto simile": è *l'ultimo bit*
+di un numero in doppia precisione — il limite di ciò che un computer può
+rappresentare. E le loss durante il training coincidono fino alla **14ª cifra
+decimale**, spesso in modo *esatto*.
+
+> **Questo dimostra che tutto il Percorso A era giusto.** Il motore di autograd con il
+> suo ordinamento topologico, l'`_unbroadcast`, la self-attention con la maschera e lo
+> scaling, la LayerNorm composita, l'AdamW con la bias-correction e il weight decay
+> disaccoppiato: ogni singolo pezzo, scritto a mano da zero, produce **gli stessi
+> identici numeri** di una libreria sviluppata da centinaia di ingegneri. Non
+> "qualcosa di simile": gli stessi numeri.
+
+C'è anche un test-guardia (`test_all_parameters_are_covered`) che verifica che i due
+modelli abbiano lo *stesso numero di parametri*: se un domani aggiungessimo un layer da
+una parte e dimenticassimo l'altra, il confronto non "passerebbe per omissione".
+
+---
+
+<a name="sec-9-4"></a>
+## 9.4 Il benchmark: quanto costa capire
+
+Ora la domanda pratica: **quanto ci è costata, in velocità, la scelta didattica di
+scrivere tutto a mano?** Misuriamo i token al secondo di training (forward + backward +
+update) sulla configurazione di RonkLM v1:
+
+```
+NumPy-CPU (ronkgrad)        9.819 tok/s    1,0x
+torch-CPU                  55.722 tok/s    5,7x
+```
+
+**5,7× solo cambiando motore, sulla stessa CPU.** Da dove viene il guadagno? Non da un
+algoritmo migliore — abbiamo appena dimostrato che i calcoli sono identici — ma da:
+
+- **niente grafo di oggetti Python**: il nostro `Tensor` crea un oggetto Python per
+  ogni operazione intermedia, con la relativa closure `_backward`. PyTorch tiene il
+  grafo in C++.
+- **kernel ottimizzati e fusi**: operazioni scritte in C++ con vettorizzazione SIMD,
+  e più operazioni fuse in un solo passaggio sulla memoria.
+- **meno allocazioni**: riuso dei buffer invece di creare nuovi array a ogni passo.
+
+> **🔧 La lezione.** Il costo della chiarezza è ~6× su CPU — un prezzo che valeva
+> assolutamente la pena pagare per capire, e che ora non paghiamo più. E il salto vero
+> non è questo: è la GPU.
+
+### Il benchmark alla scala vera, e una lezione inattesa
+
+Sulla config di RonkLM v1 (160k parametri) la GPU è risultata **più lenta** della CPU:
+
+```
+NumPy-CPU     10.125 tok/s        torch-CUDA fp32   44.400 tok/s
+torch-CPU     49.003 tok/s        torch-CUDA bf16   38.518 tok/s
+```
+
+> **📖 Perché la GPU perde sui modelli piccoli.** Con 512 token per passo e matrici
+> minuscole, ogni *kernel* (l'operazione lanciata sulla GPU) fa pochissimo lavoro, e
+> domina l'**overhead di lancio**: la CPU spende più tempo a *dire alla GPU cosa fare*
+> di quanto la GPU ne spenda a farlo. Le migliaia di core restano in gran parte fermi.
+> Lezione generale: **una GPU va misurata al carico per cui è fatta**, altrimenti si
+> trae la conclusione sbagliata.
+
+Rifacendo la misura alla scala target (134M parametri, contesto 512):
+
+```
+torch-CPU            835 tok/s     1,0x
+torch-CUDA fp32   21.289 tok/s    25,5x
+torch-CUDA bf16   26.016 tok/s    31,2x     ← ora bf16 è il più veloce, come atteso
+```
+
+**31×**. E si nota che `bf16`, inutile sul modello piccolo, diventa il migliore quando
+c'è abbastanza lavoro da dare ai tensor core.
+
+### Il collo di bottiglia eravamo noi (e come l'abbiamo tolto)
+
+Un dato però stonava: **8,7 GB di VRAM per un batch di appena 8**, e a batch 16 si
+sfiorava il limite dei 16 GB. Il colpevole era il nostro port, fedele ma ingenuo:
+
+- `MultiHeadAttention` fa un **ciclo Python su 12 teste separate**, ognuna con le sue 3
+  piccole moltiplicazioni: decine di kernel minuscoli invece di pochi grandi;
+- ogni testa **materializza la matrice di attenzione 512×512** e la tiene in memoria
+  per il backward. Con 12 teste × 12 layer, è lì che finiva la VRAM.
+
+La soluzione è quella dei GPT veri, e sta in `CausalSelfAttention`:
+
+1. **QKV fuso**: una sola `Linear(n_embd, 3·n_embd)` invece di 36 piccole.
+2. **Teste come dimensione di batch**: un `reshape` a `(B, n_head, T, head_size)` e
+   tutte le teste si calcolano insieme, senza cicli Python.
+3. **FlashAttention** (`F.scaled_dot_product_attention`): non materializza *mai* la
+   matrice T×T — la calcola a blocchi nella memoria veloce (SRAM) della GPU.
+
+Il risultato, sempre a 134M parametri e contesto 512, in bf16:
+
+```
+ batch |   didattica (ciclo teste)   |   ottimizzata (QKV fuso + Flash)
+-------|-----------------------------|----------------------------------
+    8  |  30.633 tok/s    8,7 GB     |   62.796 tok/s    4,5 GB
+   16  |   9.918 tok/s   15,6 GB     |   74.652 tok/s    7,3 GB
+   32  |   1.904 tok/s   29,4 GB(*)  |   78.314 tok/s   12,7 GB  ← ottimo
+   48  |   1.264 tok/s   43,2 GB(*)  |   29.441 tok/s   18,2 GB(*)
+(*) oltre i 16 GB: la memoria trabocca nella RAM di sistema e le prestazioni crollano
+```
+
+**2,6× più veloce e con meno della metà della VRAM.** Il punto ottimale è batch 32:
+78.314 token/s in 12,7 GB.
+
+> **🔧 E qui si vede a cosa serve davvero il test di equivalenza.** Abbiamo appena
+> riscritto il pezzo più delicato del modello in una forma completamente diversa — pesi
+> fusi in una matrice sola, teste ricomposte con dei reshape, un kernel di attention di
+> cui non vediamo il codice. Un cambiamento così, senza rete, è il modo classico di
+> introdurre un bug silenzioso. Invece abbiamo semplicemente **riverificato contro il
+> riferimento NumPy**: forward e gradienti coincidono ancora. *Possiamo ottimizzare in
+> modo aggressivo perché abbiamo qualcosa che ci dice se abbiamo rotto la matematica.*
+> Questo è il dividendo del Percorso A, e si incassa proprio adesso.
+
+### Cosa significa per la Fase 12
+
+```
+78.314 tok/s × 3600 s × 8 ore  ≈  2,26 miliardi di token
+```
+
+Con ~1,4 miliardi di token unici di italiano (Fase 11) sono circa **1,6 epoche** in una
+notte di training — vicino al regime Chinchilla per un modello da 150M. Il piano
+regge: **il 150M è addestrabile sulla 4080 Super nel budget previsto.**
+
+---
+
+<a name="sec-9-5"></a>
+## 9.5 Mixed precision e GPU: cosa cambia davvero
+
+Due concetti che entrano ora nel progetto e che governeranno il training della Fase 12.
+
+> **📖 Perché la GPU è così più veloce.** Una CPU ha pochi core molto "intelligenti"
+> (grandi cache, predizione dei salti, esecuzione fuori ordine): è ottimizzata per fare
+> *una cosa complicata alla volta, in fretta*. Una GPU ha migliaia di core semplici:
+> è ottimizzata per fare *la stessa operazione semplice su migliaia di dati insieme*.
+> Le reti neurali sono esattamente questo: moltiplicazioni di matrici, cioè milioni di
+> moltiplicazioni-e-somme tutte indipendenti. È il carico di lavoro perfetto per una
+> GPU — e il motivo per cui il deep learning moderno è nato quando qualcuno ha pensato
+> di usare le schede video per farci matematica.
+
+> **📖 Mixed precision (bf16).** I numeri in virgola mobile si possono rappresentare
+> con 32 bit (`fp32`) o 16 (`bf16`/`fp16`). Le GPU moderne hanno unità dedicate (i
+> *tensor core*) che macinano i formati a 16 bit a velocità multiple rispetto ai 32
+> bit, e usano metà memoria e metà banda. La tecnica "mixed precision" fa i calcoli
+> pesanti in 16 bit ma tiene una copia *master* dei pesi in 32 bit, perché gli
+> aggiornamenti dell'ottimizzatore sono piccoli e in 16 bit si perderebbero
+> nell'arrotondamento. `bf16` (brain float) in particolare sacrifica precisione per
+> mantenere lo stesso *range* di `fp32`, il che lo rende molto più robusto agli
+> overflow rispetto a `fp16`. Lo useremo nella Fase 12.
+
+---
+
+<a name="sec-9-6"></a>
+## 9.6 Glossario Fase 9 / cosa arriva in Fase 10
+
+Nuovi termini:
+
+- **Port**: riscrivere lo stesso programma su un'altra tecnologia mantenendone il
+  comportamento.
+- **Test di equivalenza**: confronto numerico tra due implementazioni che devono
+  produrre gli stessi risultati.
+- **Doppia precisione (`float64`)**: numeri a 64 bit; usati nel test per rendere le
+  tolleranze severe.
+- **Mixed precision / `bf16`**: calcolare in 16 bit tenendo i pesi master in 32.
+- **Tensor core**: unità della GPU dedicate alle moltiplicazioni di matrici a bassa
+  precisione.
+- **`register_buffer`**: in PyTorch, un tensore che appartiene al modulo ma **non** è un
+  parametro addestrabile (noi lo usiamo per la maschera causale).
+
+**In Fase 10** costruiremo il **tokenizer BPE, scritto a mano** — il pezzo che avevamo
+volutamente rimandato nel Percorso A ([sezione 0.3](#sec-0-3)). Adesso serve davvero: a
+livello di carattere il modello spreca capacità a compitare e il contesto rende poco.
+Il BPE impara dai dati quali sequenze frequenti meritano un simbolo dedicato, e
+trasformerà le "quasi-parole" in parole vere.
+
+---
+
+*Fine del capitolo Fase 9.*

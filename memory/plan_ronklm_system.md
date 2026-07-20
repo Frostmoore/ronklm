@@ -1600,14 +1600,32 @@ comportamento da assistente si costruisce nel Percorso C.
 
 ---
 
-## ☐ Fase 9 — Port a PyTorch, con equivalenza dimostrata
+## ☑ Fase 9 — Port a PyTorch, con equivalenza dimostrata  ✅ COMPLETATA (2026-07-19)
+
+> **Esito**: `ronklm_torch/` (GPT torch con architettura identica +
+> `load_weights_from_numpy` con le trasposizioni dei Linear) e
+> `CausalSelfAttention` ottimizzata (QKV fuso + FlashAttention).
+> **Equivalenza dimostrata a precisione macchina**: forward 1.8e-15, loss 4.4e-16,
+> gradienti (tutti i 38 parametri) 8.7e-17, 5 passi di AdamW con loss identiche fino
+> alla 14ª cifra; **anche la variante ottimizzata è verificata equivalente**.
+> 7 test di equivalenza (85 totali).
+>
+> **Benchmark (RTX 4080 Super, torch 2.11+cu128)**, config target 134M/block 512, bf16:
+> torch-CPU 835 tok/s → CUDA fp32 21.289 → CUDA bf16 26.016 (**31×**). Con l'attention
+> ottimizzata a batch 32: **78.314 tok/s in 12,7 GB** (la versione didattica saturava
+> la VRAM: 8,7 GB già a batch 8). Scoperta istruttiva: sulla config piccola (160k
+> param) la GPU è più *lenta* della CPU — overhead di lancio dei kernel.
+>
+> **➜ Conseguenza per la Fase 12: 78.314 tok/s × 8h ≈ 2,26 mld di token**, cioè ~1,6
+> epoche sui ~1,4 mld unici. **Il 150M è addestrabile nel budget previsto.** Branch `v2.3.0`.
+
 
 **Obiettivo didattico.** Tradurre RonkLM dal nostro motore a PyTorch e — questo è
 il punto — **dimostrare con un test numerico che i due dicono le stesse cose**.
 Non è una fase di abbandono del lavoro fatto: è la fase in cui il lavoro fatto
 diventa lo strumento di verifica di tutto ciò che verrà.
 
-### ☐ 9.1 — Traduzione dell'architettura (`ronklm_torch/model.py`)
+### ☑ 9.1 — Traduzione dell'architettura (`ronklm_torch/model.py`)
 
 **Cosa**: riscrivere il GPT della Fase 7 in PyTorch, mantenendo *identica*
 l'architettura e la nomenclatura dei parametri. Tabella di corrispondenza nel
@@ -1622,7 +1640,7 @@ operazioni, gestione memoria). Ogni riga della tabella rimanda alla fase del
 Percorso A dove quel pezzo è stato costruito e derivato. Chi legge il codice
 PyTorch di RonkLM con questa tabella in mano non incontra mai magia.
 
-### ☐ 9.2 — Il test di equivalenza (`tests/test_equivalence.py`)
+### ☑ 9.2 — Il test di equivalenza (`tests/test_equivalence.py`)
 
 **Cosa**: (a) *forward*: stessi pesi (esportati dal checkpoint NumPy della Fase 7,
 importati nel modello torch), stesso input → stessi logits entro tolleranza float
@@ -1641,7 +1659,7 @@ della Fase 2.6 riproposto un'ottava sopra: due strade indipendenti, stesso numer
 oppure c'è un bug. È lo stesso principio, ed è l'ultima volta che potremo
 permettercelo — da qui in poi il riferimento sarà RonkLM-torch stesso.
 
-### ☐ 9.3 — Benchmark e primi assaggi di GPU
+### ☑ 9.3 — Benchmark e primi assaggi di GPU
 
 **Cosa**: misurare token/secondo di training: NumPy-CPU vs torch-CPU vs **torch-GPU
 sulla RTX 4080 Super**, sulla config della Fase 7; documentare i fattori di speedup
@@ -1949,7 +1967,7 @@ separato). Documentato come estensione, da valutare dopo aver visto l'SFT.
 | M3 — Attenzione ✅ | 5–6 | Blocco transformer con gradient check ok e gradienti presenti su tutti i parametri |
 | M4 — GPT (NumPy) ✅ | 7 | NLL(GPT) < NLL(MLP) su val; generazione con temperature/top-k; checkpoint autosufficiente |
 | M5 — Prodotto A ✅ | 8 | Training da CLI riproducibile; tabella esperimenti; atlante verificato meccanicamente |
-| **M6 — Equivalenza** | 9 | `test_equivalence.py` verde: torch e NumPy danno stessi logits/gradienti/loss entro tolleranza |
+| **M6 — Equivalenza** ✅ | 9 | `test_equivalence.py` verde: torch e NumPy danno stessi logits/gradienti/loss entro tolleranza |
 | **M7 — BPE + dati** | 10–11 | BPE round-trip ok su italiano; ~1,2–1,5 mld token IT (Wikipedia+Gutenberg) puliti, deduplicati, binarizzati |
 | **M8 — RonkLM-150M** | 12 | Run da ~150M completato su 4080 Super (~8h); italiano corretto a livello di frase/paragrafo; valutazione qualitativa documentata |
 | **M9 — RonkLM-Chat** | 13(–14) | SFT su istruzioni italiane: tiene il formato chat e risponde a richieste semplici (toy assistant); opz. DPO |

@@ -5,9 +5,9 @@
 > aprire i file**. Se per sapere la firma di un metodo bisogna leggere il sorgente,
 > questo documento ha fallito.
 >
-> **Stato**: aggiornato a fine **Fase 7** (2026-07-19). Copre tutto il Percorso A fino
-> al GPT completo (RonkLM v1, NLL val 1.632) + infrastruttura di training/CLI (Fase 8 in
-> corso). Milestone M1–M4 completate. Piano in [`plan_ronklm_system.md`](plan_ronklm_system.md).
+> **Stato**: aggiornato a fine **Fase 9** (2026-07-19). Percorso A completo (RonkLM v1,
+> NLL val 1.632) + port PyTorch con equivalenza dimostrata e benchmark GPU.
+> Milestone M1–M6 completate. Piano in [`plan_ronklm_system.md`](plan_ronklm_system.md).
 >
 > **Verifica meccanica firme**: eseguita a fine Fase 0 con estrazione `def`/`class`
 > via grep e confronto con le tabelle qui sotto. ✅ Allineato.
@@ -36,6 +36,9 @@
 | Generazione (temperature/top-k) | `generate()` in [`ronklm/generate.py`](../ronklm/generate.py) |
 | Training loop + schedule (Fase 8) | `train()`, `cosine_lr()`, `evaluate()` in [`ronklm/train.py`](../ronklm/train.py) |
 | CLI addestra/genera (Fase 8) | [`scripts/train_ronklm.py`](../scripts/train_ronklm.py) |
+| **Port PyTorch (Fase 9)** | [`ronklm_torch/model.py`](../ronklm_torch/model.py) — `GPT`, `load_weights_from_numpy` |
+| Prova di equivalenza NumPy↔torch | [`tests/test_equivalence.py`](../tests/test_equivalence.py) |
+| Benchmark motori (CPU/GPU) | [`scripts/benchmark.py`](../scripts/benchmark.py) |
 | Eseguire tutti i test | `python run_tests.py` (radice) |
 | Runner di test senza pytest | [`tests/_runner.py`](../tests/_runner.py) |
 | Versione del pacchetto | `__version__` in [`ronklm/__init__.py`](../ronklm/__init__.py) |
@@ -68,8 +71,12 @@ RonkLM/
 │       ├── attention.py       # Head, AttentionLM (Fase 5)
 │       ├── block.py           # Block, MultiHeadAttention, FeedForward (Fase 6)
 │       └── gpt.py             # GPT, GPTConfig (Fase 7)
+├── ronklm_torch/              # [PERCORSO B] port PyTorch (Fase 9)
+│   ├── __init__.py            # tabella di corrispondenza ronkgrad <-> PyTorch
+│   └── model.py               # GPT torch, CausalSelfAttention, load_weights_from_numpy
 ├── scripts/
-│   └── train_ronklm.py        # CLI: train / generate (Fase 8)
+│   ├── train_ronklm.py        # CLI: train / generate (Fase 8)
+│   └── benchmark.py           # benchmark NumPy/torch, CPU/GPU (Fase 9.3)
 ├── tests/
 │   ├── _runner.py             # run(namespace) -> n_fallimenti
 │   ├── _gradcheck.py          # grad_check condiviso (autograd + block)
@@ -82,7 +89,8 @@ RonkLM/
 │   ├── test_attention.py      # 4 test
 │   ├── test_block.py          # 6 test
 │   ├── test_gpt.py            # 8 test
-│   └── test_train.py          # 4 test
+│   ├── test_train.py          # 4 test
+│   └── test_equivalence.py    # 7 test (NumPy <-> PyTorch)
 ├── run_tests.py               # lancia tutti i tests/test_*.py
 ├── explain.md                 # libro di testo: spiegazione didattica per fase
 ├── requirements.txt           # numpy (+ matplotlib opz., torch dalla Fase 9)
@@ -91,12 +99,14 @@ RonkLM/
 └── .gitignore
 ```
 
-**NON esiste ancora** (per evitare ricerche a vuoto): nessun GPT completo
-(`models/gpt.py`, Fase 7) con positional embedding e stack di blocchi; nessuna
-generazione con temperature/top-k; nessun salvataggio checkpoint; nessuna CLI (Fase 8).
-Esistono: bigram conteggio (1), neurale (2), autograd (3), nn+optim+MLP (4),
-self-attention (5), blocco transformer completo `Block`+`MultiHeadAttention`+
-`FeedForward`+`LayerNorm` (6).
+**NON esiste ancora** (per evitare ricerche a vuoto): nessun tokenizer **BPE**
+(`ronklm/bpe.py`, Fase 10); nessuna pipeline per il corpus grande (`data/corpus_b/`,
+estrazione ZIM da Kiwix, Fase 11); nessun training loop in PyTorch né checkpoint torch
+(Fase 12 — `ronklm/train.py` è quello NumPy); nessun SFT/chatbot (Fase 13).
+
+**Esiste**: tutto il Percorso A (Fasi 0–8, NumPy: bigram, autograd, MLP, attention,
+blocco, GPT, training+CLI) e il **port PyTorch con equivalenza dimostrata + benchmark**
+(Fase 9), incluse due varianti di attention (didattica e ottimizzata).
 
 ---
 
@@ -384,7 +394,37 @@ Sottocomandi `train` (data, steps, batch-size, block-size, n-layer, n-head, n-em
 lr, warmup, weight-decay, eval-every, seed, out, log) e `generate` (ckpt, prompt, n,
 temperature, top-k, seed).
 
-### 3.15 `data/prepare_corpus.py` — script di preparazione corpus
+### 3.15 `ronklm_torch/model.py` — port PyTorch (Fase 9)
+
+Pacchetto **separato** da `ronklm/`: i due motori convivono, il NumPy resta il
+riferimento. Architettura identica, stessi dettagli numerici (`MASK_VALUE = -1e9`,
+gelu `approximate='tanh'`, LayerNorm `eps=1e-5`).
+
+| Classe/funzione | Firma | Note |
+|---|---|---|
+| `GPTConfig` | `@dataclass(vocab_size, block_size=32, n_layer=4, n_head=4, n_embd=64)` | stessi campi della versione NumPy |
+| `Head` | `(n_embd, head_size, block_size)` / `forward(x)` | maschera causale come `register_buffer` |
+| `MultiHeadAttention` | `(n_embd, n_head, block_size)` / `forward(x)` | versione **didattica**: `nn.ModuleList` + `torch.cat` + `proj` |
+| `CausalSelfAttention` | `(n_embd, n_head, block_size)` / `forward(x)` | versione **ottimizzata**: QKV fuso + `F.scaled_dot_product_attention` (FlashAttention). Stessa matematica, 2,6× più veloce e metà VRAM |
+| `FeedForward` | `(n_embd)` / `forward(x)` | `F.gelu(..., approximate='tanh')` |
+| `Block` | `(n_embd, n_head, block_size, fast=False)` / `forward(x)` | pre-norm + residual; `fast` sceglie l'attention ottimizzata |
+| `GPT` | `(config, fast=False)` / `logits(idx)`, `forward(idx, targets=None) -> (logits, loss)`, `num_params()` | — |
+| `load_weights_from_numpy` | `(torch_model: GPT, np_model) -> None` | copia i pesi; **traspone i Linear**; gestisce sia il layout per-testa sia il **QKV fuso** |
+| `config_from_numpy` | `(np_config) -> GPTConfig` | — |
+
+> ⚠️ **Trappola disinnescata (la più importante della fase)**: il nostro `Linear`
+> tiene `W` di forma `(n_in, n_out)` e calcola `x @ W + b`; `torch.nn.Linear` tiene
+> `weight` di forma `(n_out, n_in)` e calcola `x @ weight.T + b`. Il trasferimento dei
+> pesi **richiede la trasposizione**, e lo stesso vale confrontando i gradienti. È
+> esattamente il tipo di errore che "non crasha, degrada soltanto".
+
+### 3.16 `scripts/benchmark.py` — benchmark dei motori (Fase 9.3)
+
+`bench_numpy(cfg, batch_size, steps) -> float` · `bench_torch(cfg, batch_size, steps,
+device, amp=False) -> float` → token/secondo di training. CLI con `--n-layer`,
+`--n-embd`, `--block-size`, `--batch-size`, `--steps`, `--skip-numpy`.
+
+### 3.17 `data/prepare_corpus.py` — script di preparazione corpus
 
 Funzioni (tutte a livello di modulo; script eseguibile con `python data/prepare_corpus.py [--force]`):
 
@@ -443,7 +483,20 @@ argomenti di funzione con default:
 
 ## 6. Catalogo dei test
 
-Runner: `python run_tests.py` (nessun pytest richiesto). **78 test, tutti verdi.**
+Runner: `python run_tests.py` (nessun pytest richiesto). **85 test, tutti verdi.**
+
+`tests/test_equivalence.py` (7) — la prova che il port PyTorch è corretto:
+
+| Test | Cosa dimostra |
+|---|---|
+| `test_forward_logits_match` | stessi pesi+input → stessi logit (1.8e-15) |
+| `test_loss_matches` | stessa loss (4.4e-16) |
+| `test_gradients_match` | gradienti identici su **tutti** i 38 parametri (8.7e-17) |
+| `test_all_parameters_are_covered` | guardia: i due modelli hanno lo stesso numero di parametri |
+| `test_training_steps_match` | 5 passi di AdamW: loss identiche fino alla 14ª cifra |
+| `test_fast_attention_forward_matches` | la variante ottimizzata non cambia i numeri |
+| `test_fast_attention_gradients_match` | …nemmeno i gradienti (incluso il QKV fuso) |
+
 
 `tests/test_gpt.py` (8): shape logit/loss, loss iniziale ~log(V), tutti i parametri
 con gradiente, generazione valida/riproducibile, top-k restringe il supporto,
