@@ -3945,6 +3945,35 @@ Tre fenomeni, tutti diagnosticabili:
 affidabile. È esattamente ciò che ci si aspetta a questa scala — e vederlo *dal vivo*,
 su un modello di cui possediamo ogni riga, vale più di mille spiegazioni.
 
+### Il caso carbonara: come il BPE decide *di cosa* allucinare
+
+Un esempio che merita un paragrafo, perché rivela un meccanismo profondo. Prompt:
+*"La ricetta della carbonara è "*. Risposta:
+
+> La ricetta della carbonara è omogenea e di forma cilindrica […] La carbonara si trova
+> in depositi di argilla e calcare, con una salinità di 8,3 °C […] secondo la legge di
+> Zimmermann.
+
+Il modello ha trasformato la **carbonara in un giacimento minerario**. Perché proprio
+quello? Non è casuale: è il **tokenizer** a deciderlo. Ecco come il BPE spezza le parole:
+
+```
+ carbonara  ->  [' car', 'bona', 'ra']
+ carbonaro  ->  [' car', 'bona', 'ro']     <- a UN SOLO token di distanza!
+ carbonato  ->  [' car', 'b', 'onato']     <- condivide ' car'
+```
+
+Per il modello, "carbonara" e "carbonaro" (chi fa il *carbone* — miniere, boschi,
+depositi) differiscono di un solo token; e "carbonato" (chimica minerale) condivide il
+prefisso. Nello spazio degli embedding, "carbonara" vive in un quartiere di **carbone,
+miniere e chimica** — mentre il piatto di pasta, rarissimo su Wikipedia, non ha una sua
+rappresentazione. Così l'allucinazione non è arbitraria: **segue le vicinanze che la
+sotto-tokenizzazione ha costruito**. È una delle intuizioni più importanti sul *perché*
+i modelli sbagliano in un certo modo — e l'abbiamo scoperta ridendo di un piatto di
+pasta diventato roccia sedimentaria. (Nota anche "305-305 m", "3,1-3,1 m": ha imparato
+la *forma* di un dato di Wikipedia — "numero-numero unità" — e riempie il template senza
+alcun aggancio alla realtà.)
+
 ---
 
 <a name="sec-12-3"></a>
