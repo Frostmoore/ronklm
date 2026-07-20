@@ -39,6 +39,19 @@ def cmd_train(args: argparse.Namespace) -> None:
     model = GPT(cfg, fast=True)
     print(f"[modello] {model}")
 
+    # continued pretraining: parti dai pesi di un checkpoint gia' addestrato (es. il
+    # pilota Wikipedia) invece che da zero. Serve al modello "narratore": base che SA
+    # cose, poi si continua su Gutenberg per virare lo stile al narrativo.
+    if args.init_from:
+        ck = torch.load(args.init_from, map_location="cpu", weights_only=False)
+        prev = ck["config"]
+        assert (prev.n_layer, prev.n_embd, prev.n_head, prev.vocab_size) == \
+               (cfg.n_layer, cfg.n_embd, cfg.n_head, cfg.vocab_size), \
+               "la config del checkpoint non combacia con quella richiesta"
+        model.load_state_dict(ck["model"])
+        print(f"[init] pesi caricati da {args.init_from} (era al passo {ck.get('step','?')}, "
+              f"val {ck.get('val', float('nan')):.4f})")
+
     tcfg = TrainConfig(
         train_bin=args.tokens / "train.bin",
         val_bin=args.tokens / "val.bin",
@@ -99,6 +112,8 @@ def build_parser() -> argparse.ArgumentParser:
     t.add_argument("--warmup", type=int, default=400)
     t.add_argument("--eval-every", type=int, default=500)
     t.add_argument("--compile", action="store_true")
+    t.add_argument("--init-from", type=Path, default=None,
+                   help="checkpoint da cui partire (continued pretraining)")
     t.set_defaults(func=cmd_train)
 
     g = sub.add_parser("generate", help="genera testo")
