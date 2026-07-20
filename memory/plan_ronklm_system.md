@@ -1681,13 +1681,20 @@ Percorso B.
 
 ---
 
-## ☐ Fase 10 — Tokenizer BPE scritto a mano
+## ☑ Fase 10 — Tokenizer BPE scritto a mano  ✅ COMPLETATA (2026-07-20)
+
+> **Esito**: `ronklm/bpe.py` — BPE **byte-level** (nessun testo e' mai fuori
+> vocabolario: verificato su emoji, cirillico, giapponese mai visti in training),
+> pre-tokenizzazione stile GPT-2, save/load. **9 test verdi.** Riscritto con
+> indicizzazione incrementale + heap: addestrare vocab 16.384 su 30 MB e' passato da
+> ore a **12 secondi**. Compressione ~**3,8 char/token** sull'italiano.
+
 
 **Obiettivo didattico.** Il pezzo del Percorso A volutamente rimandato (I.3):
 adesso serve davvero, e lo costruiamo da zero come tutto il resto (`ronklm/bpe.py`,
 ~200 righe). È lo stesso algoritmo (byte-pair encoding) dei tokenizer GPT reali.
 
-### ☐ 10.1 — Perché il char-level non può arrivare a "sensato"
+### ☑ 10.1 — Perché il char-level non può arrivare a "sensato"
 
 **Cosa**: sezione scritta + esperimento di conteggio sul corpus.
 
@@ -1704,7 +1711,7 @@ predizione* — predire il prossimo *token* è un compito semanticamente più ri
 che predire la prossima *lettera* (spesso ovvia), quindi ogni step di training
 insegna di più.
 
-### ☐ 10.2 — L'algoritmo BPE, da zero
+### ☑ 10.2 — L'algoritmo BPE, da zero
 
 **Cosa**: training del tokenizer: si parte dai byte/caratteri; si conta la coppia
 adiacente più frequente nel corpus; la si fonde in un nuovo simbolo; si ripete
@@ -1726,7 +1733,7 @@ addestrati bene) e ingrosserebbe embedding e testa finale, che a vocab 16k e
 misurabile: lo verificheremo guardando rapporto di compressione e frequenze di
 coda (10.3).
 
-### ☐ 10.3 — Test e misure
+### ☑ 10.3 — Test e misure
 
 **Cosa**: round-trip `decode(encode(s)) == s` su testo arbitrario (inclusi
 accenti e simboli rari); rapporto di compressione (caratteri/token) sul corpus;
@@ -1751,7 +1758,7 @@ mondo: **i dati sono metà del modello**. Costruiamo la pipeline che porta da
 "file scaricati da internet" a "miliardi di token puliti, deduplicati,
 pre-tokenizzati e streammabili".
 
-### ☐ 11.1 — Quanti dati servono: le leggi di scala
+### ☑ 11.1 — Quanti dati servono: le leggi di scala
 
 **Cosa**: sezione scritta con i conti, che fissa il target dati del progetto.
 
@@ -1779,7 +1786,7 @@ bisogno di più testo. **Le fonti, decise:**
 miscela naturale desse risultati deludenti — un corpus semplice/curato dà più coerenza
 percepita a parità di parametri, al costo di meno copertura della lingua reale.
 
-### ☐ 11.2 — La pipeline: estrazione da ZIM, pulizia, deduplicazione
+### ☑ 11.2 — La pipeline: estrazione da ZIM, pulizia, deduplicazione
 
 **Cosa**: `data/corpus_b/`: script di download/estrazione riproducibili (come 0.2, in
 grande). **Estrazione dai file ZIM di Kiwix** (via `libzim`/`zimdump`): scorrere gli
@@ -1798,7 +1805,7 @@ di cui ci fidiamo, un val contaminato rompe la bussola dell'intero percorso. Lo
 split train/val qui si fa *per documento*, mai per riga (stessa logica dello
 split contiguo di 0.4, un'ottava sopra).
 
-### ☐ 11.3 — Pre-tokenizzazione e storage binario
+### ☑ 11.3 — Pre-tokenizzazione e storage binario
 
 **Cosa**: tokenizzare *una volta* l'intero corpus col BPE della Fase 10; salvare
 gli id in file binari (`uint16` — basta, con vocab ~24–32k < 65.536) in shard;
@@ -1978,7 +1985,7 @@ separato). Documentato come estensione, da valutare dopo aver visto l'SFT.
 | M4 — GPT (NumPy) ✅ | 7 | NLL(GPT) < NLL(MLP) su val; generazione con temperature/top-k; checkpoint autosufficiente |
 | M5 — Prodotto A ✅ | 8 | Training da CLI riproducibile; tabella esperimenti; atlante verificato meccanicamente |
 | **M6 — Equivalenza** ✅ | 9 | `test_equivalence.py` verde: torch e NumPy danno stessi logits/gradienti/loss entro tolleranza |
-| **M7 — BPE + dati** | 10–11 | BPE round-trip ok su italiano; ~1,2–1,5 mld token IT (Wikipedia+Gutenberg) puliti, deduplicati, binarizzati |
+| **M7 — BPE + dati** ✅ | 10–11 | BPE round-trip ok su italiano; ~1,2–1,5 mld token IT (Wikipedia+Gutenberg) puliti, deduplicati, binarizzati |
 | **M8 — RonkLM-150M** | 12 | Run da ~150M completato su 4080 Super (~8h); italiano corretto a livello di frase/paragrafo; valutazione qualitativa documentata |
 | **M9 — RonkLM-Chat** | 13(–14) | SFT su istruzioni italiane: tiene il formato chat e risponde a richieste semplici (toy assistant); opz. DPO |
 

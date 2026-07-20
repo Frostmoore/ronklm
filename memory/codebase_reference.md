@@ -5,9 +5,9 @@
 > aprire i file**. Se per sapere la firma di un metodo bisogna leggere il sorgente,
 > questo documento ha fallito.
 >
-> **Stato**: aggiornato a fine **Fase 9** (2026-07-19). Percorso A completo (RonkLM v1,
-> NLL val 1.632) + port PyTorch con equivalenza dimostrata e benchmark GPU.
-> Milestone M1–M6 completate. Piano in [`plan_ronklm_system.md`](plan_ronklm_system.md).
+> **Stato**: aggiornato durante la **Fase 12** (2026-07-20). Percorso A completo; port
+> PyTorch con equivalenza dimostrata (F9); BPE scritto a mano (F10); corpus Wikipedia IT
+> da 1,13 mld di token (F11); training di RonkLM-50M in corso. Milestone M1–M7 completate. Piano in [`plan_ronklm_system.md`](plan_ronklm_system.md).
 >
 > **Verifica meccanica firme**: eseguita a fine Fase 0 con estrazione `def`/`class`
 > via grep e confronto con le tabelle qui sotto. ✅ Allineato.
@@ -39,6 +39,12 @@
 | **Port PyTorch (Fase 9)** | [`ronklm_torch/model.py`](../ronklm_torch/model.py) — `GPT`, `load_weights_from_numpy` |
 | Prova di equivalenza NumPy↔torch | [`tests/test_equivalence.py`](../tests/test_equivalence.py) |
 | Benchmark motori (CPU/GPU) | [`scripts/benchmark.py`](../scripts/benchmark.py) |
+| **Tokenizer BPE (Fase 10)** | `BPETokenizer` in [`ronklm/bpe.py`](../ronklm/bpe.py) |
+| Scaricare Wikipedia IT (Kiwix) | [`data/corpus_b/download_wikipedia.py`](../data/corpus_b/download_wikipedia.py) |
+| Estrarre/pulire il corpus da ZIM | [`data/corpus_b/extract_wikipedia.py`](../data/corpus_b/extract_wikipedia.py) |
+| Addestrare BPE + tokenizzare in binario | [`data/corpus_b/tokenize_corpus.py`](../data/corpus_b/tokenize_corpus.py) |
+| Training su GPU (Fase 12) | [`ronklm_torch/train.py`](../ronklm_torch/train.py) — `train()`, `BinDataset` |
+| CLI training/generazione GPU | [`scripts/train_torch.py`](../scripts/train_torch.py) |
 | Eseguire tutti i test | `python run_tests.py` (radice) |
 | Runner di test senza pytest | [`tests/_runner.py`](../tests/_runner.py) |
 | Versione del pacchetto | `__version__` in [`ronklm/__init__.py`](../ronklm/__init__.py) |
@@ -51,12 +57,17 @@
 ```
 RonkLM/
 ├── data/
-│   ├── prepare_corpus.py      # download + pulizia -> data/input.txt
-│   ├── input.txt              # [GENERATO, committato] corpus pulito, 240.920 char
-│   └── pinocchio_raw.txt      # [GENERATO, gitignored] cache download grezzo
+│   ├── prepare_corpus.py      # [A] download + pulizia -> data/input.txt
+│   ├── input.txt              # [GENERATO, committato] corpus Pinocchio, 240.920 char
+│   ├── pinocchio_raw.txt      # [GENERATO, gitignored] cache download grezzo
+│   └── corpus_b/              # [B] pipeline del corpus grande (Fase 11)
+│       ├── download_wikipedia.py   # ZIM da Kiwix, con mirror e ripresa
+│       ├── extract_wikipedia.py    # ZIM -> testo pulito (filtri, dedup, parallelo)
+│       └── tokenize_corpus.py      # BPE + tokenizzazione in uint16 (streaming)
 ├── ronklm/
 │   ├── __init__.py            # docstring pacchetto + __version__
 │   ├── tokenizer.py           # CharTokenizer
+│   ├── bpe.py                 # BPETokenizer byte-level (Fase 10)
 │   ├── dataset.py             # load_text(), Dataset
 │   ├── autograd.py            # ronkgrad: Tensor + cross_entropy + cat (Fase 3/6)
 │   ├── nn.py                  # Module, Linear, Embedding, LayerNorm (Fase 4/6)
@@ -71,12 +82,14 @@ RonkLM/
 │       ├── attention.py       # Head, AttentionLM (Fase 5)
 │       ├── block.py           # Block, MultiHeadAttention, FeedForward (Fase 6)
 │       └── gpt.py             # GPT, GPTConfig (Fase 7)
-├── ronklm_torch/              # [PERCORSO B] port PyTorch (Fase 9)
+├── ronklm_torch/              # [PERCORSO B] port PyTorch (Fase 9+)
 │   ├── __init__.py            # tabella di corrispondenza ronkgrad <-> PyTorch
-│   └── model.py               # GPT torch, CausalSelfAttention, load_weights_from_numpy
+│   ├── model.py               # GPT torch, CausalSelfAttention, load_weights_from_numpy
+│   └── train.py               # training GPU: bf16, grad accum, memmap, anti-spilling
 ├── scripts/
-│   ├── train_ronklm.py        # CLI: train / generate (Fase 8)
-│   └── benchmark.py           # benchmark NumPy/torch, CPU/GPU (Fase 9.3)
+│   ├── train_ronklm.py        # [A] CLI: train / generate (Fase 8)
+│   ├── benchmark.py           # benchmark NumPy/torch, CPU/GPU (Fase 9.3)
+│   └── train_torch.py         # [B] CLI training/generazione su GPU (Fase 12)
 ├── tests/
 │   ├── _runner.py             # run(namespace) -> n_fallimenti
 │   ├── _gradcheck.py          # grad_check condiviso (autograd + block)
@@ -89,6 +102,7 @@ RonkLM/
 │   ├── test_attention.py      # 4 test
 │   ├── test_block.py          # 6 test
 │   ├── test_gpt.py            # 8 test
+│   ├── test_bpe.py            # 9 test
 │   ├── test_train.py          # 4 test
 │   └── test_equivalence.py    # 7 test (NumPy <-> PyTorch)
 ├── run_tests.py               # lancia tutti i tests/test_*.py
@@ -99,14 +113,20 @@ RonkLM/
 └── .gitignore
 ```
 
-**NON esiste ancora** (per evitare ricerche a vuoto): nessun tokenizer **BPE**
-(`ronklm/bpe.py`, Fase 10); nessuna pipeline per il corpus grande (`data/corpus_b/`,
-estrazione ZIM da Kiwix, Fase 11); nessun training loop in PyTorch né checkpoint torch
-(Fase 12 — `ronklm/train.py` è quello NumPy); nessun SFT/chatbot (Fase 13).
+**NON esiste ancora** (per evitare ricerche a vuoto): nessun **weight tying** nel GPT
+torch (valutato per il run da 150M, non implementato); nessun **SFT/chatbot** (Percorso
+C, Fase 13); nessun corpus Gutenberg (previsto ma non ancora estratto: per il pilota si
+usa la sola Wikipedia).
 
-**Esiste**: tutto il Percorso A (Fasi 0–8, NumPy: bigram, autograd, MLP, attention,
-blocco, GPT, training+CLI) e il **port PyTorch con equivalenza dimostrata + benchmark**
-(Fase 9), incluse due varianti di attention (didattica e ottimizzata).
+**Esiste**: tutto il Percorso A (Fasi 0–8, NumPy); il port PyTorch con equivalenza
+dimostrata e benchmark (F9, due varianti di attention); il **BPE byte-level** (F10); la
+**pipeline del corpus** Wikipedia IT → 1,13 mld di token (F11); il **training su GPU**
+con CLI (F12).
+
+> **Dati fuori dal repo**: il corpus del Percorso B vive in `D:/RonkLM_corpus/`
+> (NVMe, non versionato): `wikipedia_it_all_nopic_2026-05.zim` (8,29 GB), `text/`
+> (28 shard, 4,14 GB), `tokens/` (`train.bin` 2,25 GB, `val.bin`, `bpe_16384.pkl`),
+> `run50m/` (checkpoint + `training_log.csv`).
 
 ---
 
@@ -424,7 +444,51 @@ gelu `approximate='tanh'`, LayerNorm `eps=1e-5`).
 device, amp=False) -> float` → token/secondo di training. CLI con `--n-layer`,
 `--n-embd`, `--block-size`, `--batch-size`, `--steps`, `--skip-numpy`.
 
-### 3.17 `data/prepare_corpus.py` — script di preparazione corpus
+### 3.17 `ronklm/bpe.py` — tokenizer BPE (Fase 10)
+
+BPE **byte-level**: parte dai 256 byte, quindi nessun testo è mai fuori vocabolario.
+
+| Metodo/funzione | Firma | Effetto |
+|---|---|---|
+| `_split_words` | `(text: str) -> list[str]` | pre-tokenizzazione stile GPT-2 (lo spazio resta attaccato alla parola seguente) |
+| `_merge_word` | `(word: tuple, pair: tuple, new_id: int) -> tuple` | sostituisce una coppia con il nuovo simbolo |
+| `BPETokenizer.train` | `(self, text: str, vocab_size: int, verbose=False) -> BPETokenizer` | impara le fusioni; **implementazione incrementale** (indice coppia→parole + max-heap con cancellazione pigra) |
+| `BPETokenizer.encode` | `(self, text: str) -> list[int]` | testo → id; non fallisce mai |
+| `BPETokenizer.decode` | `(self, ids: list[int]) -> str` | id → testo |
+| `BPETokenizer.vocab_size` | `(self) -> int` *(property)* | — |
+| `BPETokenizer.save` / `.load` | `(path)` | pickle (le chiavi sono tuple) + `.preview.json` leggibile |
+
+**Numeri**: vocab 16.384 addestrato su 30 MB in **12 s**; compressione ~**3,6–3,8
+caratteri/token** sull'italiano.
+
+### 3.18 `data/corpus_b/` — pipeline del corpus grande (Fase 11)
+
+| Script | Funzioni principali | Effetto |
+|---|---|---|
+| `download_wikipedia.py` | `download(url, dest)`, `MIRRORS`, `VARIANTS` | scarica lo ZIM con ripresa (header `Range`); default mirror **dotsrc** (47 MB/s vs 3,8 dell'origine) |
+| `extract_wikipedia.py` | `html_to_text`, `keep_article`, `_collapse_repeated_lines`, `extract_parallel` | ZIM → testo pulito; filtri di qualità; dedup per hash; multiprocessing a priorità bassa |
+| `tokenize_corpus.py` | `default_workers`, `_encode_chunk`, `main` | addestra il BPE su un campione, tokenizza in parallelo, scrive `train.bin`/`val.bin` in streaming |
+
+**Output** (su `D:/RonkLM_corpus/`, fuori dal repo perché su NVMe): 1.099.087 articoli,
+4,14 GB di testo → **1.128,4M token** (train 1.122,8M / val 5,6M), `uint16`, 2,25 GB.
+
+### 3.19 `ronklm_torch/train.py` — training su GPU (Fase 12)
+
+| Elemento | Firma | Effetto |
+|---|---|---|
+| `TrainConfig` | dataclass: `steps, micro_batch=32, grad_accum=4, block_size=512, base_lr, min_lr, warmup, weight_decay, grad_clip, eval_every, eval_batches, seed, compile` | — |
+| `cosine_lr` | `(step, cfg) -> float` | warmup + cosine decay |
+| `BinDataset` | `(path, block_size, device)`, `.batch(batch_size, rng)` | legge i token via `np.memmap`; `Y` = `X` shiftato di 1 |
+| `evaluate` | `(model, ds, cfg, n_batches) -> float` | NLL media su batch fissi |
+| `train` | `(model, cfg, device='cuda') -> dict` | loop con bf16 autocast, gradient accumulation, clipping, best-checkpoint, log CSV, **guardia anti-spilling** |
+
+### 3.20 `scripts/train_torch.py` — CLI GPU
+
+Sottocomandi `train` (tokens, bpe, out, n-layer/head/embd, block-size, micro-batch,
+grad-accum, steps, lr, warmup, eval-every, compile) e `generate` (ckpt, bpe, prompt, n,
+temperature, top-k).
+
+### 3.21 `data/prepare_corpus.py` — script di preparazione corpus (Percorso A)
 
 Funzioni (tutte a livello di modulo; script eseguibile con `python data/prepare_corpus.py [--force]`):
 
@@ -483,7 +547,12 @@ argomenti di funzione con default:
 
 ## 6. Catalogo dei test
 
-Runner: `python run_tests.py` (nessun pytest richiesto). **85 test, tutti verdi.**
+Runner: `python run_tests.py` (nessun pytest richiesto). **94 test, tutti verdi.**
+
+`tests/test_bpe.py` (9): round-trip italiano; **non fallisce mai** su emoji/cirillico/
+giapponese mai visti; stringa vuota; vocab rispettato; la compressione migliora col
+vocabolario; training deterministico; save/load; i merge appresi sono italiani; nessun
+token attraversa un confine di parola (le sequenze di spazi sono l'eccezione legittima).
 
 `tests/test_equivalence.py` (7) — la prova che il port PyTorch è corretto:
 

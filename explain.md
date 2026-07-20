@@ -119,6 +119,18 @@
   - [9.5 Anatomia della memoria: dove finiscono 43 GB](#sec-9-5)
   - [9.6 Mixed precision e GPU: cosa cambia davvero](#sec-9-6)
   - [9.7 Glossario Fase 9 / cosa arriva in Fase 10](#sec-9-7)
+- [Fase 10 — Il tokenizer BPE, scritto a mano](#fase-10)
+  - [10.0 Perché il char-level non basta più](#sec-10-0)
+  - [10.1 L'algoritmo BPE in una pagina](#sec-10-1)
+  - [10.2 Perché partire dai byte](#sec-10-2)
+  - [10.3 La pre-tokenizzazione: non fondere attraverso le parole](#sec-10-3)
+  - [10.4 Il problema di velocità e come l'abbiamo risolto](#sec-10-4)
+  - [10.5 Cosa ha imparato, guardato da vicino](#sec-10-5)
+- [Fase 11 — Il corpus grande: da Wikipedia ai token](#fase-11)
+  - [11.0 La pipeline in quattro passi](#sec-11-0)
+  - [11.1 Guardare i dati: tre bug trovati a occhio](#sec-11-1)
+  - [11.2 I filtri di qualità e perché sono severi](#sec-11-2)
+  - [11.3 Binarizzazione e memmap](#sec-11-3)
 
 ---
 
@@ -3512,3 +3524,312 @@ trasformerà le "quasi-parole" in parole vere.
 ---
 
 *Fine del capitolo Fase 9.*
+
+---
+
+<a name="fase-10"></a>
+# Fase 10 — Il tokenizer BPE, scritto a mano
+
+Nel Percorso A avevamo deliberatamente evitato il BPE ([sezione 0.3](#sec-0-3)): sarebbe
+stato un ostacolo tra noi e i concetti che contavano. Adesso serve davvero, e lo
+costruiamo da zero come tutto il resto — è lo stesso algoritmo dei tokenizer dei GPT
+reali.
+
+📁 File: [`ronklm/bpe.py`](ronklm/bpe.py)
+
+---
+
+<a name="sec-10-0"></a>
+## 10.0 Perché il char-level non basta più
+
+Tre costi che a 50–150M parametri diventano proibitivi:
+
+1. **Contesto sprecato.** 512 posizioni char-level ≈ 80 parole italiane: troppo poche
+   per la coerenza di un paragrafo. Con il BPE (~3,8 caratteri per token in italiano)
+   le *stesse* 512 posizioni valgono ~300 parole. E siccome l'attention costa **T²**
+   ([sezione 9.5](#sec-9-5)), comprare contesto allungando T è carissimo, mentre
+   *densificare i token* è quasi gratis.
+2. **Capacità sprecata.** Un modello char-level spende una fetta dei suoi strati solo
+   per *compitare* ("m-a-n-g-i-a-r-e è una parola") prima ancora di poter modellare la
+   sintassi. Il BPE gli consegna le parole frequenti già intere.
+3. **Segnale più povero.** Predire la prossima *lettera* è spesso ovvio; predire il
+   prossimo *token* è un compito semanticamente più ricco, quindi ogni passo di
+   training insegna di più.
+
+---
+
+<a name="sec-10-1"></a>
+## 10.1 L'algoritmo BPE in una pagina
+
+*Byte Pair Encoding* è compressione guidata dai dati, e l'idea sta in una frase:
+
+> Parti dai byte. Trova la **coppia adiacente più frequente** nel corpus. Fondila in un
+> **nuovo simbolo**. Ripeti finché il vocabolario non raggiunge la taglia voluta.
+
+Un esempio giocattolo. Corpus: `"basso basso passo"`.
+
+```
+inizio:      b a s s o _ b a s s o _ p a s s o
+coppia piu' frequente: "s"+"s" (3 volte)  ->  nuovo simbolo X=ss
+dopo:        b a X o _ b a X o _ p a X o
+coppia piu' frequente: "a"+"X" (3 volte)  ->  nuovo simbolo Y=aX
+dopo:        b Y o _ b Y o _ p Y o
+...e cosi' via
+```
+
+Le sequenze frequenti si guadagnano un simbolo dedicato; quelle rare restano scomposte.
+Il risultato è un vocabolario **adattivo**: `"che"`, `"zione"`, `"Michele"` diventano
+token singoli, mentre una parola rarissima resta spezzata — ma *sempre
+rappresentabile*.
+
+Per codificare un testo nuovo, si riapplicano le fusioni **nell'ordine in cui sono state
+imparate** (le prime imparate sono le più frequenti, quindi vanno applicate per prime).
+
+---
+
+<a name="sec-10-2"></a>
+## 10.2 Perché partire dai byte
+
+Il nostro BPE parte dai **256 byte**, non dai caratteri. È una scelta con una
+conseguenza importante:
+
+> **📖 Nessun testo è mai "fuori vocabolario".** Qualunque cosa — italiano, cinese,
+> emoji, dati binari — è una sequenza di byte. Nel caso peggiore il tokenizer la
+> scompone in byte singoli, che sono sempre nei primi 256 token. È la proprietà che il
+> word-level non poteva dare ([sezione 0.3](#sec-0-3)): niente parole sconosciute, mai.
+
+Lo verifichiamo con un test esplicito: il tokenizer è addestrato solo su *Pinocchio*
+(che non contiene né emoji né cirillico né giapponese), eppure:
+
+```python
+tok.decode(tok.encode("🍕🚀"))        == "🍕🚀"        ✓
+tok.decode(tok.encode("Привет мир"))  == "Привет мир"  ✓
+tok.decode(tok.encode("日本語のテキスト")) == "日本語のテキスト" ✓
+```
+
+> **🔧 Un effetto collaterale da capire.** Siccome si lavora sui byte, alcuni token
+> intermedi corrispondono a *pezzi* di un carattere multi-byte (la `à` in UTF-8 sono
+> due byte). Se li stampi da soli vedi il carattere di sostituzione `�`. Non è un bug:
+> è un token che ha senso solo insieme al successivo. Il testo decodificato completo è
+> sempre corretto.
+
+---
+
+<a name="sec-10-3"></a>
+## 10.3 La pre-tokenizzazione: non fondere attraverso le parole
+
+Prima di applicare il BPE, spezziamo il testo in "parole" con un'espressione regolare
+(la stessa idea di GPT-2). Senza questo passaggio, l'algoritmo fonderebbe volentieri
+attraverso gli spazi e creerebbe token come `"della_casa"`: spreco di vocabolario e
+pessima generalizzazione.
+
+Un dettaglio elegante della convenzione: **lo spazio resta attaccato alla parola che
+segue** (`" casa"` invece di `" "` + `"casa"`). Così il modello distingue `"casa"` a
+inizio riga da `" casa"` dentro una frase, senza sprecare un token per lo spazio
+isolato.
+
+> **🔧 Un test che sbagliava (e cosa ha insegnato).** Avevo scritto un test che
+> pretendeva che *nessun* token contenesse uno spazio oltre la prima posizione. È
+> fallito su un token `"  "` (due spazi). Ma il test aveva torto, non il codice: le
+> **sequenze di spazi** sono un'unità a sé e devono poter diventare un token unico —
+> servono a comprimere indentazione e righe vuote, e lo fa anche GPT-2. L'invariante
+> giusta è: *o il token è tutto spazi, oppure ha al massimo uno spazio iniziale*. È un
+> buon promemoria che un test rosso non significa sempre "codice rotto".
+
+---
+
+<a name="sec-10-4"></a>
+## 10.4 Il problema di velocità e come l'abbiamo risolto
+
+La prima versione era corretta ma inutilizzabile su Wikipedia. Il motivo:
+
+> **📖 Il costo della versione ingenua.** Dopo *ogni* fusione, ricontava **tutte** le
+> coppie di **tutte** le parole. Con 16.000 fusioni e ~260.000 parole uniche sono
+> decine di miliardi di operazioni: ore di calcolo.
+
+La cura è un'indicizzazione incrementale, e vale la pena capirla perché è un pattern
+generale:
+
+1. **Non scorrere il corpus, scorri le parole uniche.** Wikipedia ha miliardi di token
+   ma solo qualche centinaio di migliaia di parole *distinte*. Si contano le coppie una
+   volta sola, pesate per la frequenza di ciascuna parola.
+2. **Tieni un indice `coppia → quali parole la contengono`.** Quando fondi una coppia,
+   tocchi **solo** quelle parole, non tutte.
+3. **Aggiorna i conteggi in differenza**, togliendo le vecchie coppie e aggiungendo le
+   nuove, invece di ricontare da zero.
+4. **Usa un max-heap con cancellazione pigra** per pescare la coppia più frequente
+   senza riscandire il dizionario: le voci obsolete si scartano al momento del prelievo
+   confrontandole col conteggio corrente.
+
+Il risultato misurato: l'addestramento di un vocabolario da **16.384 token su 30 MB di
+Wikipedia è passato da "ore" a 12 secondi**. Stesso identico risultato, solo senza
+sprecare lavoro.
+
+---
+
+<a name="sec-10-5"></a>
+## 10.5 Cosa ha imparato, guardato da vicino
+
+Come per le heatmap di attention ([sezione 5.5](#sec-5-5)), ispezionare ciò che
+l'algoritmo ha appreso è la verifica più convincente. Ecco alcune fusioni, in ordine di
+apprendimento, dal BPE addestrato su Wikipedia italiana:
+
+```
+merge     0:  ' d'          (567.788 volte)
+merge   500:  'uro'
+merge  1000:  'ide'
+merge  1500:  ' acqu'
+merge  2000:  ' membro'
+merge  3000:  ' attore'
+merge  4000:  ' Michele'
+merge  4500:  ' giocò'
+merge  7000:  ' svilupp'
+merge  8500:  ' classificata'
+merge 12500:  ' possedeva'
+merge 16127:  ' necessarie'
+```
+
+Si legge la struttura dell'italiano emergere da sola: prima i digrammi frequentissimi
+(`' d'`), poi suffissi e morfemi (`'uro'`, `'ide'`), poi radici (`' acqu'`,
+`' svilupp'`), infine parole intere sempre più specifiche (`' possedeva'`,
+`' necessarie'`) e nomi propri comuni nell'enciclopedia (`' Michele'`, `' Buenos'`,
+`' Innsbruck'`). **Nessuno ha scritto una regola grammaticale: è tutto statistica sui
+dati.**
+
+Sul nostro corpus, la compressione risultante è di circa **3,8 caratteri per token** —
+cioè le stesse 512 posizioni di contesto ora valgono quasi quattro volte più testo che
+nel Percorso A.
+
+---
+
+<a name="fase-11"></a>
+# Fase 11 — Il corpus grande: da Wikipedia ai token
+
+📁 File: [`data/corpus_b/`](data/corpus_b/) — `download_wikipedia.py`,
+`extract_wikipedia.py`, `tokenize_corpus.py`
+
+<a name="sec-11-0"></a>
+## 11.0 La pipeline in quattro passi
+
+```
+1. DOWNLOAD    dump ZIM di Wikipedia IT da Kiwix           8,29 GB
+2. ESTRAZIONE  ZIM -> testo pulito (HTML via, filtri)      4,14 GB, 1.099.087 articoli
+3. BPE         addestramento su un campione                vocab 16.384
+4. TOKENIZZA   testo -> uint16 binario + split train/val   ~1,1 mld token
+```
+
+Due decisioni pratiche che hanno fatto la differenza:
+
+> **🔧 Il mirror.** Il server ufficiale di Kiwix dava **3,8 MB/s**; il mirror
+> `mirrors.dotsrc.org` ne dava **47**. Su 8,3 GB è la differenza tra 2 ore e 3 minuti.
+> Vale sempre la pena misurare invece di accettare la prima fonte.
+
+> **🔧 Il disco.** Il corpus sta su un **SSD NVMe**, non sull'HDD dove vive il
+> progetto. Il file dei token verrà letto ad *accesso casuale* a ogni batch: da un
+> disco meccanico il caricamento dati diventerebbe il collo di bottiglia e la GPU
+> resterebbe ferma ad aspettare. Regola: in un training ben fatto il collo di bottiglia
+> dev'essere la GPU, mai il disco.
+
+---
+
+<a name="sec-11-1"></a>
+## 11.1 Guardare i dati: tre bug trovati a occhio
+
+La disciplina imparata in [Fase 0.4](#sec-0-4) — *stampare il testo estratto e
+leggerlo* — ha ripagato immediatamente. La prima versione dell'estrattore produceva
+questo:
+
+```
+!!
+
+!!
+
+!!
+
+A questo titolo corrispondono più voci, di seguito elencate.
+Questa è una pagina di disambiguazione; se sei giunto qui cliccando un collegamento...
+...
+Questa voce è stata pubblicata da Wikipedia. Il testo è rilasciato in base alla
+licenza Creative Commons Attribution-Share Alike 4.0...
+```
+
+Tre difetti, tutti gravi e tutti invisibili senza guardare:
+
+1. **Le pagine di disambiguazione passavano tutte.** Il mio filtro cercava
+   `"disambigua"` nel *titolo*, ma le disambiguazioni hanno titoli normalissimi
+   (`"$5,000 Reward"`): il marcatore sta nel **testo**. Risultato: un corpus pieno di
+   elenchi di rimandi invece che di prosa.
+2. **Il titolo ripetuto 3–4 volte** all'inizio di ogni documento (l'HTML dello ZIM lo
+   contiene nel `<title>`, nell'intestazione e nell'`<h1>`, e io ne aggiungevo un
+   quarto). Il modello avrebbe imparato quel tic.
+3. **Il boilerplate di licenza in fondo a ogni articolo.** Un milione di articoli × la
+   stessa formula legale = il modello l'avrebbe vista più di qualunque altra frase
+   italiana, e imparata a memoria.
+
+C'era anche un bug più sottile nel primo tentativo di correzione: il collassatore di
+righe ripetute confrontava righe *adiacenti*, ma i titoli duplicati sono separati da
+righe vuote — quindi non ne eliminava nemmeno uno. Andava confrontata l'ultima riga
+**non vuota**.
+
+---
+
+<a name="sec-11-2"></a>
+## 11.2 I filtri di qualità e perché sono severi
+
+Su 3.226.161 voci del dump ne teniamo **1.099.087** (circa un terzo). Cosa buttiamo, e
+perché:
+
+| Filtro | Motivo |
+|---|---|
+| Redirect e voci non-HTML | non sono testo |
+| Namespace `Categoria:`, `Template:`, `Portale:`… | metadati, non prosa |
+| Articoli < 400 caratteri | stub: poco segnale, molto rumore |
+| Pagine di disambiguazione | elenchi di rimandi |
+| Pagine-lista (>80% righe corte) | "Elenco di…", cronologie: non prosa |
+| Testo con < 60% di lettere | tabelle di numeri, codici |
+| Duplicati esatti (hash del contenuto) | vedi sotto |
+
+> **📖 Perché la deduplicazione è il filtro più importante.** I duplicati (a) fanno
+> **memorizzare** invece di generalizzare — lo stesso testo visto 50 volte è 50 volte
+> più memorizzato; (b) **contaminano la validation**: se lo stesso documento finisce in
+> train e in val, la loss di validation *mente*, e siccome è l'unica bussola di cui ci
+> fidiamo ([sezione 4.6](#sec-4-6)), un val contaminato rompe l'intero esperimento.
+
+> **⚠️ Un limite dichiarato.** L'estrazione gira su 15 processi paralleli, e la
+> deduplicazione è **per processo**: due articoli identici capitati in intervalli
+> diversi sopravvivono entrambi. Sui dati reali il tasso di duplicati esatti in
+> Wikipedia è bassissimo (0 su 6.000 nei test), quindi il compromesso vale i ~45 minuti
+> risparmiati. Lo scriviamo esplicitamente invece di far finta di niente: un limite
+> noto è gestibile, uno nascosto no.
+
+---
+
+<a name="sec-11-3"></a>
+## 11.3 Binarizzazione e memmap
+
+L'ultimo passo trasforma 4,14 GB di testo in un file binario di token.
+
+> **📖 Perché pre-tokenizzare invece di farlo al volo.** Tokenizzare costa CPU. Farlo a
+> ogni epoca significherebbe rifare ogni volta lo stesso identico lavoro, tenendo la
+> GPU affamata. Lo facciamo una volta e salviamo il risultato.
+
+> **📖 Perché `uint16`.** Il nostro vocabolario ha 16.384 token, ben sotto i 65.536
+> rappresentabili con 2 byte. Quindi 1,1 miliardi di token occupano ~2,2 GB — un file
+> che si legge comodamente.
+
+> **📖 Perché `np.memmap`.** Invece di caricare i 2,2 GB in RAM, li lasciamo su disco e
+> il sistema operativo porta in memoria **solo le finestre effettivamente lette**. Il
+> training parte in un istante e usa memoria costante, qualunque sia la dimensione del
+> corpus. È lo schema di nanoGPT, e ora ne capiamo ogni ragione.
+
+Anche la scrittura è in **streaming**: i blocchi tokenizzati vengono scritti man mano
+invece di essere accumulati in una lista. Accumulare avrebbe richiesto ~5 GB di RAM di
+picco (2,2 per la lista + 2,2 per la concatenazione finale); così ne bastano pochi MB.
+
+Infine lo split train/val, con la stessa logica contigua della [Fase 0.7](#sec-0-7): la
+validation è un blocco **in coda**, testo che il modello non vede mai durante
+l'addestramento.
+
+---
+
+*Fine dei capitoli Fasi 10 e 11.*

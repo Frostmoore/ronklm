@@ -9,3 +9,7 @@ numpy>=1.24
 #   pip install --index-url https://download.pytorch.org/whl/cu128 torch
 # (verificato su RTX 4080 Super / sm_89 con torch 2.11.0+cu128)
 torch>=2.8
+
+# Percorso B, Fase 11 (preparazione del corpus grande):
+libzim>=3.4      # lettura dei dump ZIM di Kiwix (Wikipedia)
+psutil>=5.9      # per abbassare la priorita' dei processi: il PC resta usabile
