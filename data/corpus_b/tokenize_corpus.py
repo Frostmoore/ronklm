@@ -88,19 +88,23 @@ def _iter_chunks(paths: list[Path], chunk_chars: int):
 def main() -> None:
     ap = argparse.ArgumentParser(description="Addestra il BPE e tokenizza il corpus.")
     ap.add_argument("--text-dir", type=Path, default=DEFAULT_TEXT)
+    ap.add_argument("--glob", default="wiki_it_*.txt", help="pattern degli shard di testo")
     ap.add_argument("--out-dir", type=Path, default=DEFAULT_OUT)
     ap.add_argument("--vocab-size", type=int, default=16384)
     ap.add_argument("--sample-mb", type=int, default=40, help="MB di testo per addestrare il BPE")
     ap.add_argument("--val-frac", type=float, default=0.005, help="frazione tenuta per la validation")
+    ap.add_argument("--single", default=None,
+                    help="se dato, scrive un unico file <single>.bin senza split train/val "
+                         "(usato per tokenizzare un corpus da mescolare a valle, es. Gutenberg)")
     ap.add_argument("--workers", type=int, default=default_workers(),
                     help="processi paralleli (default: ~2/3 dei core, per tenere il PC reattivo)")
     ap.add_argument("--chunk-chars", type=int, default=2_000_000)
     args = ap.parse_args()
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
-    shards = sorted(args.text_dir.glob("wiki_it_*.txt"))
+    shards = sorted(args.text_dir.glob(args.glob))
     if not shards:
-        sys.exit(f"nessuno shard in {args.text_dir}: esegui prima extract_wikipedia.py")
+        sys.exit(f"nessuno shard '{args.glob}' in {args.text_dir}: esegui prima l'estrazione")
     total_mb = sum(p.stat().st_size for p in shards) / 1024**2
     print(f"[corpus] {len(shards)} shard, {total_mb:,.0f} MB")
 
@@ -144,7 +148,14 @@ def main() -> None:
                 print(f"  blocco {i:5d}  {n/1e6:8.1f}M token  "
                       f"({el/60:.1f} min, {n/1e6/max(el,1e-9):.2f}M tok/s)", flush=True)
 
-    # --- 3. split train/val -----------------------------------------------
+    # --- 3a. modalita' file unico (per il mix a valle) --------------------
+    if args.single:
+        dst = args.out_dir / f"{args.single}.bin"
+        all_path.rename(dst)
+        print(f"\n[fine] {n/1e6:,.1f}M token -> {dst.name} ({n*2/1024**3:.2f} GB)")
+        return
+
+    # --- 3b. split train/val ----------------------------------------------
     # Split in CODA e contiguo (stessa logica della Fase 0.4): la validation e' un
     # blocco di testo che il modello non vede mai durante il training.
     n_val = int(n * args.val_frac)
