@@ -17,9 +17,12 @@ runs/
 # Cache del download grezzo del corpus A (riproducibile via prepare_corpus.py)
 data/pinocchio_raw.txt
 
-# Corpus grande (Percorso B) — riproducibile via script, non versionato
-data/corpus_b/
+# Corpus grande (Percorso B): i DATI non si versionano (sono GB e si rigenerano),
+# ma gli SCRIPT della pipeline sì — sono il codice che li rende riproducibili.
+data/corpus_b/*
+!data/corpus_b/*.py
 data/*.bin
+*.zim
 
 # Grafici generati
 *.png
