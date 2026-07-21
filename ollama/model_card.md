@@ -1,8 +1,11 @@
 # RonkLM-1 (0.05b)
 
-**Un piccolo modello linguistico italiano da ~50 milioni di parametri, costruito
-interamente da zero — per *capire* come funziona un LLM, non per competere con i grandi.**
+> **Descrizione pubblicata su ollama.com (dall'autore):**
+> *"Modellino fatto per divertirmi. Spara un sacco di cazzate, ma è comunque più
+> divertente di Emma."*
 
+Un piccolo modello linguistico italiano da ~50 milioni di parametri, costruito
+interamente da zero — per *capire* come funziona un LLM, non per competere con i grandi.
 Ogni singolo pezzo è scritto a mano e compreso riga per riga: dal primo bigram in NumPy
 a un motore di autograd, dalla self-attention al tokenizer BPE byte-level, fino alla
 conversione in GGUF. Nessuna scatola nera, nessuna libreria di deep learning nascosta.
