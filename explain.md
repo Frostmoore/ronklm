@@ -138,6 +138,21 @@
   - [12.3 Il narratore: continued-pretraining su Gutenberg](#sec-12-3)
   - [12.4 Le lezioni del blackout](#sec-12-4)
   - [12.5 Saturazione e leggi di scala: perché arriva RonkGPT-2](#sec-12-5)
+- [Fase 13 — SFT: insegnare a rispondere](#fase-13)
+  - [13.0 Base ≠ chat: il pezzo che manca](#sec-13-0)
+  - [13.1 I dati: istruzioni italiane già pronte](#sec-13-1)
+  - [13.2 Il template senza token speciali](#sec-13-2)
+  - [13.3 La loss mascherata: rispondere, non ripetere](#sec-13-3)
+  - [13.4 Il fine-tuning in 25 secondi](#sec-13-4)
+  - [13.5 Il risultato: un toy assistant onesto](#sec-13-5)
+- [Fase 14 — GGUF e Ollama: il modello nel mondo](#fase-14)
+  - [14.0 Cos'è GGUF e perché la conversione non è banale](#sec-14-0)
+  - [14.1 La nostra architettura È un GPT-2](#sec-14-1)
+  - [14.2 I tre disallineamenti (e come si risolvono)](#sec-14-2)
+  - [14.3 Tradurre il tokenizer byte-level](#sec-14-3)
+  - [14.4 Il Modelfile e il caricamento in Ollama](#sec-14-4)
+  - [14.5 La prova del nove e la pubblicazione](#sec-14-5)
+  - [14.6 La fine del viaggio](#sec-14-6)
 
 ---
 
@@ -4083,3 +4098,427 @@ le ~8 ore del modello grande. E l'ha validata alla perfezione, blackout compreso
 ---
 
 *Fine del capitolo Fase 12.*
+
+---
+
+<a name="fase-13"></a>
+# Fase 13 — SFT: insegnare a rispondere
+
+RonkLM-1 (dopo pilota + narratore) sa *continuare* testo, ma non sa *rispondere* a
+domande. In questa fase gli insegniamo il comportamento da assistente con il
+**fine-tuning supervisionato** (SFT, Supervised Fine-Tuning). È il primo passo del
+Percorso C — la trasformazione da modello base a chatbot.
+
+📁 File: [`data/corpus_b/prep_sft.py`](data/corpus_b/prep_sft.py),
+[`scripts/sft.py`](scripts/sft.py)
+
+---
+
+<a name="sec-13-0"></a>
+## 13.0 Base ≠ chat: il pezzo che manca
+
+Questa è la distinzione più importante da capire, e sfugge a molti.
+
+> **📖 Concetto: modello base contro modello di chat.** Un modello *base* (come tutto
+> ciò che abbiamo addestrato finora) fa una cosa sola: dato del testo, ne predice la
+> continuazione. Se gli dai *"Cos'è l'amicizia?"*, non "risponde" — **continua**, magari
+> con *"...è una domanda che molti si pongono. In questo articolo vedremo..."* (stile
+> Wikipedia) o con l'inizio di un racconto. Non ha idea che tu ti aspetti una risposta,
+> perché non ha mai visto una **conversazione**.
+
+Per trasformarlo in qualcosa che *risponde*, serve una fase di addestramento in più,
+dopo il pretraining, su esempi di **conversazioni**: coppie `domanda → risposta`. Il
+modello impara due cose: (1) il **formato** del dialogo (dopo una domanda viene una
+risposta, poi ci si ferma); (2) a **restare sul tema** invece di divagare.
+
+> **🔧 La cosa bella del nostro caso.** La *voce* del nostro modello è già narrativa
+> (l'ha presa da Gutenberg nella fase precedente). Quindi l'SFT deve insegnargli solo a
+> **rispondere**, non lo stile: le risposte usciranno automaticamente nella voce
+> letteraria che ha già in pancia. È il motivo per cui abbiamo fatto prima il narratore
+> e poi l'SFT, e non il contrario.
+
+---
+
+<a name="sec-13-1"></a>
+## 13.1 I dati: istruzioni italiane già pronte
+
+Non costruiamo il dataset a mano — la community ha già tradotto/generato decine di
+migliaia di coppie istruzione-risposta in italiano. Usiamo **alpaca-gpt4-italian**
+(~50.000 esempi, con le risposte generate da GPT-4, quindi ben scritte).
+
+Ma i dati grezzi non vanno bene così: le risposte di GPT-4 hanno una **mediana di 512
+caratteri** (troppo lunghe per un modello da 50M, che perde il filo), il 35% contiene
+**liste ed elenchi markdown** (che un modellino piccolo non regge), e ci sono i
+disclaimer da assistente (*"Come intelligenza artificiale, non appartengo a nessun
+paese..."*) che rovinerebbero la voce narrativa. Filtriamo:
+
+- **lunghezza** risposta tra 20 e 350 caratteri (frasi complete che il modello sa finire);
+- **niente liste/markdown/codice** (`- `, `* `, `1.`, `` ``` ``, `#`, `|`);
+- **niente disclaimer** ("come intelligenza artificiale", "modello linguistico", ...).
+
+Da 50.000 esempi ne restano **16.857** puliti — prosa breve, che è esattamente ciò che
+un modellino può imparare a produrre per intero.
+
+> **📖 La lezione, di nuovo:** i dati contano più della quantità. Meglio 17.000 esempi
+> puliti che 50.000 con liste e disclaimer. È la stessa disciplina della [Fase 11.2](#sec-11-2).
+
+---
+
+<a name="sec-13-2"></a>
+## 13.2 Il template senza token speciali
+
+Come si "impacchetta" una coppia domanda-risposta perché il modello impari il formato?
+Con un **template**: una struttura testuale fissa che segnala i ruoli.
+
+```
+### Domanda:
+{la domanda}
+
+### Risposta:
+{la risposta}
+
+### Domanda:
+```
+
+Molti sistemi usano **token speciali** appositi (`<|user|>`, `<|assistant|>`). Noi **no**,
+e la scelta ha una ragione precisa:
+
+> **🔧 Perché niente token speciali.** Aggiungere un token nuovo al vocabolario
+> significa aggiungere una riga all'embedding e alla testa del modello, e ri-addestrarli.
+> Ma soprattutto: complicherebbe la **conversione in GGUF** della Fase 14 (i token
+> speciali vanno esportati con cura). Usando marcatori *testuali* normali (`### Domanda:`),
+> restiamo compatibili con qualsiasi tokenizer e con la pipeline di Ollama, senza toccare
+> niente. Semplicità che ripaga a valle.
+
+Nota il `### Domanda:` **finale**: fa parte di ogni esempio, e insegna al modello a
+*chiudere* la risposta iniziando una nuova domanda. In generazione ci fermeremo proprio
+quando il modello produce quella stringa (è lo "stop" di Ollama nella Fase 14).
+
+---
+
+<a name="sec-13-3"></a>
+## 13.3 La loss mascherata: rispondere, non ripetere
+
+Ecco il cuore tecnico dell'SFT, e un'idea elegante. Quando addestriamo su un esempio
+`domanda → risposta`, su **quali** token calcoliamo la loss?
+
+> **📖 Concetto: la maschera sulla loss.** Se calcolassimo la loss su *tutti* i token
+> (domanda inclusa), insegneremmo al modello a *predire anche la domanda* — ma la domanda
+> la scrive l'utente, non lui! Sarebbe capacità sprecata. Vogliamo che impari a produrre
+> la **risposta**. Quindi calcoliamo la loss **solo sui token della risposta** (e sul
+> `### Domanda:` di chiusura, per imparare a fermarsi), e la azzeriamo su quelli della
+> domanda.
+
+Nel codice questo diventa una **maschera** parallela alla sequenza di token:
+
+```
+token:   ### Domanda:  Cos'è l'amicizia?  \n### Risposta:\n  L'amicizia è un legame...
+maschera:  0  0  0  0  0  0  0  0  0  0  0  0  0  0  0  0  0   1  1  1  1  1  1  1  ...
+                  (la domanda: niente loss)                    (la risposta: loss)
+```
+
+La loss finale è la cross-entropy per-token, moltiplicata per la maschera, mediata solo
+sui token "attivi":
+
+```python
+per_tok = F.cross_entropy(logits, Y, reduction="none")   # loss di ogni token
+loss = (per_tok * mask).sum() / mask.sum()               # media SOLO sui token di risposta
+```
+
+`prep_sft.py` costruisce due file binari appaiati: `sft_tokens.bin` (i token) e
+`sft_mask.bin` (la maschera, 1 sulle risposte). Sui nostri 16.857 esempi, il **48% dei
+token** ha loss attiva (le risposte), il resto sono domande e template.
+
+---
+
+<a name="sec-13-4"></a>
+## 13.4 Il fine-tuning in 25 secondi
+
+L'SFT parte dai pesi del narratore e continua ad addestrare, ma con tre accortezze:
+- **learning rate basso** (5e-5): non vogliamo *stravolgere* il modello, solo insegnargli
+  un formato. Un LR alto cancellerebbe la lingua e lo stile faticosamente appresi;
+- **poche epoche** (3): il dataset è piccolo (1,4M token), bastano pochi passaggi;
+- **loss mascherata** (la [sezione precedente](#sec-13-3)).
+
+Il dataset è così piccolo che l'intero SFT dura **25 secondi** (496 passi su una RTX
+4080 Super). La loss sulle risposte scende da 2,87 a ~1,7 — il modello ha imparato il
+formato in fretta, perché non deve imparare la *lingua* (già la sa), solo il *galateo*
+della conversazione.
+
+---
+
+<a name="sec-13-5"></a>
+## 13.5 Il risultato: un toy assistant onesto
+
+Ed ecco RonkLM-1 che risponde:
+
+```
+D: Cos'è l'amicizia?
+R: L'amicizia è una delle relazioni più significative e comuni che si svolgono oggi.
+
+D: Chi era Dante Alighieri?
+R: C'era un poeta, Dante Alighieri, che era un poeta.
+
+D: Perché il cielo è azzurro?
+R: Quando il cielo è blu, possiamo vedere il cielo come è blu.
+```
+
+Fermiamoci a leggere cosa è successo, perché è istruttivo:
+
+- ✅ **Il formato è stato imparato**: riconosce la domanda, produce una risposta, si ferma
+  da solo. Questo è il *comportamento da assistente*, ed è tutto ciò che l'SFT doveva
+  insegnare.
+- ✅ **Aggancia il tema giusto**: "Dante → poeta", "amicizia → relazione". La domanda
+  condiziona la risposta, non è testo a caso.
+- ❌ **Zero sostanza, tautologie pure**: "un poeta che era un poeta", "il cielo è blu
+  perché è blu". È il tetto dei 50M che conosciamo bene: **sa rispondere, non sa cosa
+  rispondere.**
+
+> **📖 La verità sull'SFT (e sui chatbot piccoli).** L'SFT insegna il *comportamento*,
+> non la *conoscenza*. Non aggiunge fatti che il modello non ha: prende ciò che il modello
+> già sa (poco) e lo mette in forma di risposta. Un chatbot da 50M è quindi
+> "convincente in forma, vuoto in sostanza" — un pappagallo educato. La competenza vera
+> emerge a scale 20-60× più grandi (1-3 miliardi di parametri). Ma il *meccanismo* con
+> cui ChatGPT è diventato ChatGPT — l'SFT su conversazioni con loss mascherata — è
+> esattamente questo, e ora lo possiedi.
+
+---
+
+*Fine del capitolo Fase 13.*
+
+---
+
+<a name="fase-14"></a>
+# Fase 14 — GGUF e Ollama: il modello nel mondo
+
+L'ultimo passo: prendere RonkLM-1, che vive come checkpoint PyTorch sul nostro disco, e
+trasformarlo in un modello **scaricabile ed eseguibile da chiunque** tramite Ollama.
+Questo significa convertirlo nel formato **GGUF** e pubblicarlo. È la fase con più
+incognite tecniche di tutto il Percorso B, e la affrontiamo con la solita disciplina:
+piccoli passi, e **verifica che l'output combaci** prima di cantare vittoria.
+
+📁 File: [`scripts/to_gguf.py`](scripts/to_gguf.py),
+[`ollama/Modelfile`](ollama/Modelfile), [`ollama/model_card.md`](ollama/model_card.md)
+
+---
+
+<a name="sec-14-0"></a>
+## 14.0 Cos'è GGUF e perché la conversione non è banale
+
+> **📖 Concetto: GGUF.** È il formato di file usato da **llama.cpp** (il motore
+> d'inferenza in C++ che gira ovunque, anche senza GPU) e quindi da **Ollama** (che è,
+> in sostanza, llama.cpp con una comoda interfaccia). Un file `.gguf` contiene *tutto*
+> ciò che serve per eseguire un modello: i pesi, i metadati dell'architettura (quanti
+> layer, quante teste, ...) e il **tokenizer completo** (vocabolario + regole di fusione).
+> Autosufficiente, come il nostro checkpoint `.npz` della [Fase 7.4](#sec-7-4) ma in
+> grande.
+
+Perché la conversione non è un semplice "esporta"? Perché **llama.cpp non sa eseguire
+un'architettura qualsiasi**: conosce solo un insieme fisso di architetture note (Llama,
+Mistral, GPT-2, ...). Il nostro modello è *custom* — l'abbiamo inventato noi. Per
+eseguirlo, dobbiamo **mapparlo su una delle architetture che llama.cpp conosce**. E qui
+arriva la fortuna che ci siamo costruiti da soli.
+
+---
+
+<a name="sec-14-1"></a>
+## 14.1 La nostra architettura È un GPT-2
+
+Ricordi come abbiamo costruito RonkLM, pezzo per pezzo? Token embedding + **positional
+embedding appresi**, blocchi **pre-norm**, **GELU** (approssimazione tanh),
+**multi-head attention** standard, testa lineare finale. Mettiamo questa lista accanto a
+GPT-2:
+
+| RonkLM | GPT-2 |
+|---|---|
+| positional embedding appresi | ✅ identico |
+| blocchi pre-norm | ✅ identico |
+| GELU tanh | ✅ identico (GPT-2 usa `gelu_new` = tanh) |
+| multi-head attention causale | ✅ identico |
+| LayerNorm con bias | ✅ identico |
+
+**Siamo un GPT-2.** Non per caso: abbiamo seguito lo stesso schema costruttivo. E GPT-2
+è una delle architetture che llama.cpp esegue nativamente (`arch = "gpt2"`). Quindi la
+strada esiste: mappare i nostri tensori sui nomi che llama.cpp si aspetta per GPT-2. Il
+lavoro didattico di tutto il progetto ripaga proprio qui — non stiamo forzando un cubo
+in un buco tondo, stiamo dichiarando una parentela vera.
+
+---
+
+<a name="sec-14-2"></a>
+## 14.2 I tre disallineamenti (e come si risolvono)
+
+"Siamo un GPT-2" al 95%. Ci sono tre piccole differenze, e onestà vuole che le si tratti
+una per una — sono esattamente il genere di dettaglio che "non crasha, degrada soltanto".
+
+**1. L'orientamento dei pesi (il non-problema).** GPT-2 in HuggingFace usa `Conv1D`, che
+salva i pesi come `(in, out)`; i convertitori standard li devono **trasporre**. Noi
+usiamo `nn.Linear`, che salva come `(out, in)` — che è **già** l'orientamento che
+llama.cpp si aspetta. Quindi, paradossalmente, il nostro modello è *più facile* di GPT-2
+da convertire: nessuna trasposizione. (È lo specchio della trappola della
+[Fase 9.2](#sec-9-2): stessa questione, verso opposto.)
+
+**2. Il bias della QKV (mancante → zeri).** La nostra attention ottimizzata
+(`CausalSelfAttention`) fonde Q, K, V in una sola proiezione **senza bias**. GPT-2 invece
+ha un bias sulla QKV, e llama.cpp lo *pretende*. Soluzione: scriviamo un bias di **zeri**.
+Uno zero sommato non cambia niente — è matematicamente un no-op — ma soddisfa la struttura
+attesa. Il modello resta identico.
+
+**3. Il bias della testa (presente → scartato).** La nostra testa finale (`nn.Linear`)
+ha un bias; GPT-2 no, e llama.cpp non lo applica. Qui c'è una vera **approssimazione**:
+scartando il bias della testa, i logit cambiano di una costante per ogni token del
+vocabolario. La magnitudine media è 0,167 — non enorme ma non nulla. La scelta onesta:
+scartarlo e **verificare all'atto pratico** che l'output non peggiori (spoiler della
+[sezione 14.5](#sec-14-5): non peggiora in modo percepibile).
+
+> **🔧 La morale dei tre punti.** Convertire un modello custom non è mai "premi un
+> bottone": è un lavoro di corrispondenza precisa, dove ogni piccola differenza tra la
+> tua architettura e quella di destinazione va notata e gestita. Averlo costruito noi
+> significa che *sappiamo* dove sono le differenze, invece di scoprirle a suon di output
+> sbagliati.
+
+---
+
+<a name="sec-14-3"></a>
+## 14.3 Tradurre il tokenizer byte-level
+
+Questo è il pezzo che temevo di più, e per una buona ragione: se il tokenizer di Ollama
+spezza il testo diversamente da come lo spezzava il nostro in addestramento, il modello
+vedrebbe sequenze di token *diverse da quelle su cui è stato addestrato* → output
+degradato o spazzatura. La tokenizzazione deve combaciare **esattamente**.
+
+> **📖 Concetto: la mappa `bytes_to_unicode` di GPT-2.** Il nostro BPE lavora sui byte
+> grezzi (0-255). GPT-2 fa lo stesso, ma per rappresentare i token come *stringhe*
+> stampabili usa una mappa fissa che manda ogni byte in un carattere unicode univoco
+> (i byte non stampabili, come lo spazio o l'a-capo, vengono spostati in una zona di
+> caratteri visibili). Per esportare il nostro tokenizer nel formato GPT-2, prendiamo
+> ogni token del nostro vocabolario — che è una sequenza di byte — e mandiamo ogni byte
+> attraverso questa mappa, ottenendo la stringa che llama.cpp si aspetta.
+
+Poi esportiamo le **regole di fusione** (i merge) nello stesso spazio: per ogni fusione
+`(pezzo_a, pezzo_b)` appresa dal nostro BPE, scriviamo la riga `stringa_a stringa_b`,
+nell'ordine di apprendimento (che è l'ordine di applicazione). E dichiariamo il
+**pre-tokenizzatore**: `tokenizer.ggml.pre = "gpt-2"`, così llama.cpp spezza il testo con
+la stessa regex stile-GPT-2 che usa il nostro `_split_words`.
+
+> **📖 Perché ha funzionato.** Il nostro BPE è, per costruzione, della **stessa famiglia**
+> di GPT-2 (byte-level, pre-tokenizzazione stile GPT-2). Non è una coincidenza fortunata:
+> l'avevamo scritto così apposta ([Fase 10.3](#sec-10-3)), pensando anche a questo momento.
+> La compatibilità non è capitata, l'abbiamo progettata.
+
+---
+
+<a name="sec-14-4"></a>
+## 14.4 Il Modelfile e il caricamento in Ollama
+
+Il GGUF contiene il modello, ma Ollama ha bisogno di sapere **come parlarci**: quale
+template usare per le domande, quando fermarsi, che parametri di default. Questo si
+dichiara in un **Modelfile** (l'analogo di un Dockerfile, ma per i modelli):
+
+```dockerfile
+FROM D:/RonkLM_corpus/ronklm1.gguf
+
+TEMPLATE """### Domanda:
+{{ .Prompt }}
+
+### Risposta:
+"""
+
+PARAMETER stop "### Domanda:"
+PARAMETER temperature 0.7
+PARAMETER num_ctx 512
+SYSTEM """Sei RonkLM-1... Rispondi in modo narrativo."""
+```
+
+Nota come il `TEMPLATE` **replica esattamente** il formato dell'SFT ([Fase 13.2](#sec-13-2)),
+e come lo `stop` sfrutti il `### Domanda:` che abbiamo insegnato al modello a produrre per
+chiudere. Tutto torna: la scelta di *non* usare token speciali in Fase 13 rende questo
+Modelfile pulito e portabile.
+
+Poi, un comando:
+
+```
+ollama create ronklm1 -f ollama/Modelfile
+```
+
+Ollama legge il GGUF, verifica l'architettura, ne fa un modello del suo registro locale.
+**Il fatto che non dia errore è già una vittoria**: significa che l'architettura gpt2 e
+il tokenizer tradotto sono stati accettati.
+
+---
+
+<a name="sec-14-5"></a>
+## 14.5 La prova del nove e la pubblicazione
+
+Ma "carica senza errori" non basta. La domanda vera: **genera sensato come il PyTorch, o
+sputa spazzatura per un mismatch nascosto?** Confrontiamo, stesso prompt e stesso seed:
+
+```
+D: Cos'è l'amicizia?
+  PyTorch : L'amicizia è una delle relazioni più significative e comuni...
+  Ollama  : L'amicizia è un legame naturale che unisce i due elementi...
+
+D: Chi era Dante Alighieri?
+  Ollama  : Guido, maestro, / Padroneggiare, / Foglie infuocate.   (risponde in versi!)
+```
+
+**Coerente, italiano, stessa qualità del PyTorch.** Nessuna spazzatura — il che dimostra
+che il tokenizer è stato tradotto correttamente (un mismatch avrebbe prodotto caratteri a
+caso), l'architettura mappata giusta, e che scartare il bias della testa non ha rotto
+niente. **Il modello ricaricato in Ollama *è* il nostro modello.** Tutti e tre i
+disallineamenti della [sezione 14.2](#sec-14-2), disinnescati e verificati.
+
+La pubblicazione è l'ultimo miglio: Ollama autentica il *push* con una coppia di chiavi
+(la pubblica registrata sull'account, la privata che firma dal PC — nessun segreto da
+digitare). Un `ollama push` più tardi, RonkLM-1 è online:
+
+```
+ollama run ronconiric/ronklm-1:0.05b
+```
+
+Scaricabile da chiunque, ovunque — dallo stesso posto da cui si scaricano Llama e Mistral.
+
+---
+
+<a name="sec-14-6"></a>
+## 14.6 La fine del viaggio
+
+Fermati a guardare cosa abbiamo costruito, dall'inizio di questo libro a qui:
+
+```
+un bigram che CONTA          (NumPy, Fase 1)
+  → la backpropagation A MANO  (Fase 2)
+  → un motore di autograd      ronkgrad, verificato al bit (Fase 3)
+  → embedding, MLP, AdamW      (Fase 4)
+  → self-attention             (Fase 5)
+  → il blocco transformer      (Fase 6)
+  → il GPT completo            (Fase 7)
+  → training serio e CLI       (Fase 8)
+  → il port PyTorch            equivalente a precisione macchina (Fase 9)
+  → il tokenizer BPE A MANO    (Fase 10)
+  → 1,1 miliardi di token      da Wikipedia (Fase 11)
+  → RonkLM-1 su GPU            48M parametri, sopravvissuto a un blackout (Fase 12)
+  → il narratore Gutenberg     (continued-pretraining)
+  → l'SFT: risponde            (Fase 13)
+  → GGUF → Ollama, PUBBLICATO   (Fase 14)
+```
+
+Ogni freccia è codice che abbiamo scritto **e capito**. Non c'è una sola scatola nera in
+tutta la catena: il gradiente della cross-entropy, la self-attention con la sua maschera
+causale, l'ottimizzatore AdamW, il tokenizer byte-level, la conversione GGUF — tutto tuo,
+tutto compreso.
+
+RonkLM-1 è un **giocattolo**: scrive italiano fluente ma inventa i fatti, risponde a tono
+ma non sa nulla, è convincente in forma e vuoto in sostanza. Ma è *il tuo* giocattolo,
+dalla prima moltiplicazione di matrici in NumPy fino al prompt in Ollama — e conoscerne
+ogni riga vale infinitamente più di usare un modello mille volte più grande senza sapere
+cosa fa dentro.
+
+E se un giorno vorrai il salto di qualità vero — un modello che *sa* davvero qualcosa —
+la strada è tracciata e collaudata: **RonkGPT-2 (0.15b)**, tre volte più grande, una notte
+di GPU. Ma quello è un altro capitolo. Questo, il primo, si chiude qui: **hai costruito un
+modello linguistico, da zero, capendolo fino in fondo — e l'hai messo nel mondo.**
+
+---
+
+*Fine del capitolo Fase 14 — e del libro (per ora).* 🚂

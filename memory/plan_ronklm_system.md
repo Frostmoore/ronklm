@@ -1826,12 +1826,12 @@ della Fase 1.1 ha finalmente il suo avversario alla giusta scala.
 
 ---
 
-## ◐ Fase 12 — RonkLM-1 (0.05b) pilota FATTO · RonkGPT-2 (0.15b) da fare
+## ☑ Fase 12 — RonkLM-1 (0.05b) pilota COMPLETO ✅ · RonkGPT-2 (0.15b) da fare
 
-> **Nomenclatura (utente)**: **RonkLM-1** = pilota ~0,05b (50M); **RonkGPT-2** =
-> modello grande ~0,15b (150M), l'obiettivo M8.
+> **Nomenclatura (utente)**: **RonkLM-1** = pilota ~0,05b (50M, ✅ fatto e pubblicato su
+> Ollama); **RonkGPT-2** = modello grande ~0,15b (150M), obiettivo M8b, da fare.
 >
-> **Esito pilota RonkLM-1** (2026-07-20): GPT-torch 10 layer/8 teste/embd 512/block
+> **Esito pilota RonkLM-1** (2026-07-20/21, val finale **2,79**): GPT-torch 10 layer/8 teste/embd 512/block
 > 512 = **48,6M param**, addestrato su Wikipedia IT (1,1 mld token) a ~196k tok/s,
 > 6,7 GB VRAM. Val loss 9,88→2,93 (in ~1h30). Scrive italiano grammaticalmente
 > corretto ma inventa i fatti (atteso). **Blackout a step 16k**: ripresa robusta
@@ -1945,9 +1945,19 @@ aggiuntive di addestramento *dopo* il pretraining. Il calcolo non è il problema
 di un 150M sono minuti/ore sulla 4080); i veri fattori sono i **dati di istruzioni** e
 le **aspettative**.
 
-## ☐ Fase 13 — SFT: da modello base ad assistente
+## ☑ Fase 13 — SFT: da modello base ad assistente  ✅ COMPLETATA (2026-07-21, su RonkLM-1)
 
-### ☐ 13.1 — I dati: dataset di istruzioni italiani esistenti
+> **Esito**: SFT fatto sul **narratore** (non sul pilota puro), così eredita la voce
+> Gutenberg. Dati: **alpaca-gpt4-italian** filtrato (risposte brevi in prosa, niente
+> liste/markdown/disclaimer) → **16.857 esempi, 1,4M token**. Template **testuale**
+> `### Domanda:/### Risposta:` (NIENTE token speciali, per non complicare il GGUF).
+> Loss **mascherata** solo sulle risposte (48% dei token). Fine-tuning: 496 passi, lr
+> 5e-5, 3 epoche, loss risposte 2,87→1,7, **25 secondi**. Risultato: risponde nel
+> formato giusto, si ferma da solo, aggancia il tema ("Dante→poeta") ma è **vuoto e
+> tautologico** ("il cielo è blu perché è blu") — toy assistant, come atteso a 50M.
+> File: `data/corpus_b/prep_sft.py`, `scripts/sft.py`. Branch `v2.5.0`.
+
+### ☑ 13.1 — I dati: dataset di istruzioni italiani esistenti
 
 **Cosa**: NON costruiamo il dataset da zero — **esistono già** dataset di istruzioni in
 italiano, pronti su HuggingFace. Candidati: traduzioni italiane di **Alpaca** e
@@ -1959,7 +1969,7 @@ costosissimo; la community ha già tradotto/curato decine di migliaia di coppie
 `istruzione → risposta` in italiano. La decisione (quali dataset, quanti esempi, come
 filtrare la qualità delle traduzioni) è registrata qui.
 
-### ☐ 13.2 — Il formato di chat e la loss mascherata
+### ☑ 13.2 — Il formato di chat e la loss mascherata
 
 **Cosa**: templatizzare le conversazioni con marcatori di ruolo (es.
 `<|user|> … <|assistant|> …`), aggiunti al tokenizer come token speciali. Addestrare
@@ -1970,7 +1980,7 @@ insegnargli a *rispondere*, non a ri-generare la domanda.
 il modello spenderebbe capacità a imparare a *scrivere le domande* invece che le
 risposte. Mascherare l'input è lo standard dell'instruction tuning.
 
-### ☐ 13.3 — Il run di SFT e la valutazione
+### ☑ 13.3 — Il run di SFT e la valutazione
 
 **Cosa**: fine-tuning del base (learning rate piccolo, 1–3 epoche sul dataset di
 istruzioni), partendo dai pesi della Fase 12. Valutazione: una batteria di prompt di
@@ -1983,12 +1993,28 @@ non ChatGPT — la soglia di utilità reale è ~1–3 mld di parametri.
 **Deliverable di fase**: **RonkLM-Chat** — il modello base istruito, che conversa in
 forma. Fine del Percorso C (se ci fermiamo qui).
 
-## ☐ Fase 14 — (opzionale) Allineamento DPO
+## ☑ Fase 14 — Packaging GGUF + Ollama  ✅ COMPLETATA (2026-07-21)
 
-**Cosa** (solo se ne varrà la pena): un giro di **DPO** (Direct Preference
-Optimization) su coppie di risposte `preferita / non preferita` per rendere l'assistente
-un po' più utile/coerente. Più semplice del RLHF classico (niente modello di reward
-separato). Documentato come estensione, da valutare dopo aver visto l'SFT.
+> **Esito**: RonkLM-1 convertito in **GGUF** (arch gpt2) e **pubblicato su Ollama**:
+> `ollama.com/ronconiric/ronklm-1:0.05b` (194 MB F32). La nostra architettura È un GPT-2
+> (pos emb appresi, pre-norm, GELU-tanh, MHA, testa lineare) → mappata sull'arch che
+> llama.cpp esegue. Tre disallineamenti gestiti e VERIFICATI: (1) pesi nn.Linear (out,in)
+> = orientamento diretto, niente trasposizione; (2) QKV senza bias → zeri (no-op); (3)
+> bias della testa (magnitudine 0,167) scartato, impatto trascurabile. Tokenizer
+> byte-level tradotto nella mappa `bytes_to_unicode` di GPT-2 + merge, pre="gpt-2".
+> **Prova del nove**: output Ollama coerente come il PyTorch → tokenizer tradotto giusto.
+> File: `scripts/to_gguf.py`, `ollama/Modelfile`, `ollama/model_card.md`. Branch `v2.5.0`.
+
+**FINE del Percorso C (proof of concept RonkLM-1).**
+
+### 14.1–14.3 (dettaglio) — vedi `explain.md` capitolo Fase 14.
+
+## ☐ Fase 15 — (estensione futura) Allineamento DPO
+
+**Cosa** (solo se ne varrà la pena, e più probabilmente su RonkGPT-2 che sul 50M): un
+giro di **DPO** (Direct Preference Optimization) su coppie `preferita / non preferita`
+per rendere l'assistente più utile/coerente. Più semplice del RLHF classico. Estensione
+documentata, non ancora affrontata.
 
 ---
 
@@ -2006,8 +2032,10 @@ separato). Documentato come estensione, da valutare dopo aver visto l'SFT.
 | M5 — Prodotto A ✅ | 8 | Training da CLI riproducibile; tabella esperimenti; atlante verificato meccanicamente |
 | **M6 — Equivalenza** ✅ | 9 | `test_equivalence.py` verde: torch e NumPy danno stessi logits/gradienti/loss entro tolleranza |
 | **M7 — BPE + dati** ✅ | 10–11 | BPE round-trip ok su italiano; ~1,2–1,5 mld token IT (Wikipedia+Gutenberg) puliti, deduplicati, binarizzati |
-| **M8 — RonkLM-150M** | 12 | Run da ~150M completato su 4080 Super (~8h); italiano corretto a livello di frase/paragrafo; valutazione qualitativa documentata |
-| **M9 — RonkLM-Chat** | 13(–14) | SFT su istruzioni italiane: tiene il formato chat e risponde a richieste semplici (toy assistant); opz. DPO |
+| **M8a — RonkLM-1 (0.05b) pilota** ✅ | 12 | Run da 48,6M su Wikipedia completato (val 2,79); narratore via continued-pretrain Gutenberg; generazione con temperature/top-k. Il "run pilota" che valida la pipeline prima del 150M. |
+| **M8b — RonkGPT-2 (0.15b)** | 12 | *Da fare*: run da ~150M su Wikipedia+Gutenberg (~8h sulla 4080); italiano corretto a livello di frase/paragrafo. |
+| **M9 — RonkLM-1-Chat** ✅ | 13 | SFT su istruzioni italiane: tiene il formato chat, risponde a richieste semplici (toy assistant). RonkLM-1 pubblicato su Ollama. |
+| **M10 — Packaging** ✅ | 14 | GGUF (arch gpt2) verificato equivalente al PyTorch; pubblicato `ollama.com/ronconiric/ronklm-1:0.05b`. |
 
 ## IV.2 Rituale di fine fase (da istruzioni globali — obbligatorio)
 
@@ -2040,12 +2068,19 @@ sezione a ogni fase e mantiene un indice navigabile.
 
 ## IV.3 Stato attuale
 
-- ☑ **Percorso A COMPLETO** ✅ (2026-07-18/19): Fasi 0–8, tutto in NumPy puro, 78 test
-  verdi. RonkLM v1 (GPT ~160k param, NLL val 1.632). Milestone M1–M5. Ultimo branch
-  `v2.1.0`. Checkpoint locale: `checkpoints/ronklm_v1.npz`.
-- ☐ **Fase 9 — Port a PyTorch** *(prossima, dal 2026-07-20)*.
-- ☐ Fasi 10–12 (Percorso B, PyTorch, **~150M**) — non iniziate.
-- ☐ Fasi 13–14 (Percorso C, chatbot via SFT) — non iniziate.
+- ☑ **Percorso A COMPLETO** ✅ (2026-07-18/19): Fasi 0–8, NumPy puro, 78 test verdi.
+  RonkLM v1 (GPT ~160k param, NLL val 1.632). Milestone M1–M5. Branch `v2.1.0`.
+- ☑ **Percorso B — Fasi 9–11 COMPLETE** ✅ (2026-07-19/20): port PyTorch con equivalenza a
+  precisione macchina (F9); BPE byte-level a mano (F10); corpus Wikipedia IT 1,1 mld token
+  + Gutenberg IT 100M (F11). 94 test verdi.
+- ☑ **Fase 12 — RonkLM-1 (0.05b) pilota COMPLETO** ✅ (2026-07-20/21): 48,6M param, val
+  2,79 su Wikipedia; sopravvissuto a un blackout (ripresa robusta aggiunta); narratore via
+  continued-pretrain Gutenberg. È il **run pilota** che valida la pipeline per il 150M.
+- ☑ **Percorso C — Fasi 13–14 COMPLETE** ✅ (2026-07-21): SFT (toy assistant); **GGUF +
+  pubblicazione su Ollama** (`ronconiric/ronklm-1:0.05b`). Milestone M9–M10.
+- ☐ **RonkGPT-2 (0.15b)** — il modello grande *da fare* (M8b): la pipeline è collaudata,
+  serve una notte di GPU su Wikipedia+Gutenberg. Eventuale DPO in Fase 15.
+- Branch corrente: **`v2.5.0`**.
 
 ## IV.4 Decisioni prese e decisioni aperte
 

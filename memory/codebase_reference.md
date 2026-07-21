@@ -5,9 +5,12 @@
 > aprire i file**. Se per sapere la firma di un metodo bisogna leggere il sorgente,
 > questo documento ha fallito.
 >
-> **Stato**: aggiornato durante la **Fase 12** (2026-07-20). Percorso A completo; port
-> PyTorch con equivalenza dimostrata (F9); BPE scritto a mano (F10); corpus Wikipedia IT
-> da 1,13 mld di token (F11); training di RonkLM-50M in corso. Milestone M1–M7 completate. Piano in [`plan_ronklm_system.md`](plan_ronklm_system.md).
+> **Stato**: aggiornato a fine **Fase 14** (2026-07-21). **RonkLM-1 (0.05b) completo e
+> pubblicato su Ollama** (`ronconiric/ronklm-1:0.05b`). Percorso A (NumPy); Percorso B
+> Fasi 9–12 (port PyTorch equivalente, BPE a mano, corpus 1,1 mld token, pilota 50M
+> addestrato val 2,79); Percorso C Fasi 13–14 (SFT toy assistant, GGUF/Ollama).
+> Milestone M1–M10 (manca solo M8b = RonkGPT-2 150M). Piano in
+> [`plan_ronklm_system.md`](plan_ronklm_system.md).
 >
 > **Verifica meccanica firme**: eseguita a fine Fase 0 con estrazione `def`/`class`
 > via grep e confronto con le tabelle qui sotto. ✅ Allineato.
@@ -47,6 +50,10 @@
 | Costruire il mix narratore (Gutenberg-dominante) | [`data/corpus_b/build_storyteller_mix.py`](../data/corpus_b/build_storyteller_mix.py) |
 | Training su GPU + ripresa (Fase 12) | [`ronklm_torch/train.py`](../ronklm_torch/train.py) — `train()`, `BinDataset`, `cosine_lr` |
 | CLI training/generazione GPU | [`scripts/train_torch.py`](../scripts/train_torch.py) — `--init-from`/`--resume`/`--start-step` |
+| **Preparare i dati SFT (Fase 13)** | [`data/corpus_b/prep_sft.py`](../data/corpus_b/prep_sft.py) — filtro + template + loss mask |
+| **SFT: fine-tuning e chat (Fase 13)** | [`scripts/sft.py`](../scripts/sft.py) — `train`/`chat`, loss mascherata |
+| **Convertire in GGUF (Fase 14)** | [`scripts/to_gguf.py`](../scripts/to_gguf.py) — arch gpt2, tokenizer byte-level |
+| **Modelfile + descrizione Ollama** | [`ollama/Modelfile`](../ollama/Modelfile) · [`ollama/model_card.md`](../ollama/model_card.md) |
 | Eseguire tutti i test | `python run_tests.py` (radice) |
 | Runner di test senza pytest | [`tests/_runner.py`](../tests/_runner.py) |
 | Versione del pacchetto | `__version__` in [`ronklm/__init__.py`](../ronklm/__init__.py) |
@@ -67,7 +74,8 @@ RonkLM/
 │       ├── extract_wikipedia.py    # ZIM -> testo pulito (filtri, dedup, parallelo)
 │       ├── extract_gutenberg.py    # libri EPUB -> testo (boilerplate PG)
 │       ├── tokenize_corpus.py      # BPE + tokenizzazione in uint16 (streaming)
-│       └── build_storyteller_mix.py  # mix Gutenberg-dominante per il narratore
+│       ├── build_storyteller_mix.py  # mix Gutenberg-dominante per il narratore
+│       └── prep_sft.py             # dati SFT: filtro + template + loss mask (Fase 13)
 ├── ronklm/
 │   ├── __init__.py            # docstring pacchetto + __version__
 │   ├── tokenizer.py           # CharTokenizer
@@ -90,10 +98,15 @@ RonkLM/
 │   ├── __init__.py            # tabella di corrispondenza ronkgrad <-> PyTorch
 │   ├── model.py               # GPT torch, CausalSelfAttention, load_weights_from_numpy
 │   └── train.py               # training GPU: bf16, grad accum, memmap, anti-spilling
+├── ollama/                    # [C] packaging Ollama (Fase 14)
+│   ├── Modelfile              # template chat, stop, system narrativo
+│   └── model_card.md          # descrizione del modello per ollama.com
 ├── scripts/
 │   ├── train_ronklm.py        # [A] CLI: train / generate (Fase 8)
 │   ├── benchmark.py           # benchmark NumPy/torch, CPU/GPU (Fase 9.3)
-│   └── train_torch.py         # [B] CLI training/generazione su GPU (Fase 12)
+│   ├── train_torch.py         # [B] CLI training/generazione su GPU (Fase 12)
+│   ├── sft.py                 # [C] fine-tuning SFT + chat (Fase 13)
+│   └── to_gguf.py             # [C] conversione GGUF per Ollama (Fase 14)
 ├── tests/
 │   ├── _runner.py             # run(namespace) -> n_fallimenti
 │   ├── _gradcheck.py          # grad_check condiviso (autograd + block)
@@ -118,20 +131,22 @@ RonkLM/
 ```
 
 **NON esiste ancora** (per evitare ricerche a vuoto): nessun **weight tying** nel GPT
-torch (valutato per il run da 150M, non implementato); nessun **SFT/chatbot** (Percorso
-C, Fase 13); nessun corpus Gutenberg (previsto ma non ancora estratto: per il pilota si
-usa la sola Wikipedia).
+torch (valutato per il 150M, non implementato); nessun **RonkGPT-2 (150M)** — il modello
+grande è *da fare* (la pipeline è collaudata dal pilota); nessun **DPO** (Fase 15,
+estensione futura).
 
-**Esiste**: tutto il Percorso A (Fasi 0–8, NumPy); il port PyTorch con equivalenza
-dimostrata e benchmark (F9, due varianti di attention); il **BPE byte-level** (F10); la
-**pipeline del corpus** Wikipedia IT → 1,13 mld di token (F11); il **training su GPU**
-con CLI (F12).
+**Esiste**: tutto il Percorso A (Fasi 0–8, NumPy); il port PyTorch equivalente + benchmark
+(F9, due varianti di attention); il **BPE byte-level** (F10); la **pipeline del corpus**
+Wikipedia IT 1,1 mld + Gutenberg IT 100M (F11); **RonkLM-1 (0.05b)** addestrato su GPU con
+ripresa robusta (F12), narratore via continued-pretrain, **SFT** toy assistant (F13),
+**GGUF + pubblicazione su Ollama** (F14).
 
-> **Dati fuori dal repo**: il corpus del Percorso B vive in `D:/RonkLM_corpus/`
-> (NVMe, non versionato): ZIM Wikipedia (8,29 GB) e Gutenberg (1 GB), `text/` (Wikipedia,
-> 4,14 GB) e `text_gutenberg/` (317 MB, 1.081 libri), `tokens/` (`train.bin` 2,25 GB /
-> `val.bin` / `gutenberg.bin` 100,9M / `bpe_16384.pkl`), `tokens_story/` (mix narratore,
-> 123,9M), `run50m/` (RonkLM-1: `best.pt` pesi + `last.pt` stato completo + log CSV).
+> **Dati/artefatti fuori dal repo**: vivono in `D:/RonkLM_corpus/` (NVMe, non versionato):
+> ZIM Wikipedia (8,29 GB) e Gutenberg (1 GB); `text/` (Wikipedia 4,14 GB) e
+> `text_gutenberg/` (317 MB, 1.081 libri); `tokens/` (`train.bin` 2,25 GB / `val.bin` /
+> `gutenberg.bin` 100,9M / `bpe_16384.pkl`); `tokens_story/` (mix narratore 123,9M);
+> `sft/` (dati SFT + `ronklm1_chat.pt`); `run50m/` e `run_story/` (checkpoint + log);
+> `ronklm1.gguf` (194 MB). Il **modello pubblicato**: `ollama.com/ronconiric/ronklm-1:0.05b`.
 
 ---
 
@@ -507,10 +522,47 @@ val di solo Gutenberg → 123,9M token in `tokens_story/`.
 ### 3.20 `scripts/train_torch.py` — CLI GPU
 
 Sottocomandi `train` (tokens, bpe, out, n-layer/head/embd, block-size, micro-batch,
-grad-accum, steps, lr, warmup, eval-every, compile) e `generate` (ckpt, bpe, prompt, n,
-temperature, top-k).
+grad-accum, steps, lr, warmup, eval-every, compile, **`--init-from`/`--resume`/`--start-step`**)
+e `generate` (ckpt, bpe, prompt, n, temperature, top-k).
 
-### 3.21 `data/prepare_corpus.py` — script di preparazione corpus (Percorso A)
+### 3.21 `data/corpus_b/prep_sft.py` — dati SFT (Percorso C, Fase 13)
+
+Da un dataset di istruzioni (`alpaca-gpt4-italian`) costruisce due binari appaiati.
+
+| Elemento | Firma | Effetto |
+|---|---|---|
+| `is_clean` | `(q: str, a: str) -> bool` | filtro: lunghezza 20–350, no liste/markdown/codice, no disclaimer da assistente |
+| `main` | `() -> None` | tokenizza col BPE, scrive `sft_tokens.bin` (uint16) e `sft_mask.bin` (uint8, 1 sulle risposte) |
+| costanti | `PROMPT_TPL`, `ANSWER_SUFFIX` | template testuale `### Domanda:/### Risposta:` (niente token speciali) |
+
+**Numeri**: 16.857 esempi tenuti (su ~50k), 1,4M token, 48% con loss (risposte).
+
+### 3.22 `scripts/sft.py` — fine-tuning supervisionato + chat (Percorso C, Fase 13)
+
+| Sottocomando/funzione | Firma | Effetto |
+|---|---|---|
+| `cmd_train` | `(args)` | fine-tuning dal narratore; **loss mascherata** `(per_tok * mask).sum()/mask.sum()`; lr 5e-5, 3 epoche |
+| `cmd_chat` | `(args)` | genera una risposta al `--prompt`, si ferma allo stop `### Domanda:` |
+| costanti | `PROMPT_TPL`, `STOP`, `NARRATOR`, `OUT` | template + checkpoint |
+
+CLI: `train` (init, epochs, batch, block-size, lr, warmup), `chat` (ckpt, prompt, n,
+temperature, top-k). **Numeri**: 496 passi, 25 s, loss risposte 2,87→1,7.
+
+### 3.23 `scripts/to_gguf.py` — conversione GGUF per Ollama (Percorso C, Fase 14)
+
+Converte il modello (chat) in **GGUF arch gpt2**, eseguibile da llama.cpp/Ollama.
+
+| Elemento | Firma | Effetto |
+|---|---|---|
+| `bytes_to_unicode` | `() -> dict[int,str]` | la mappa byte→carattere di GPT-2 (per esportare il tokenizer) |
+| `main` | `() -> None` | scrive metadati + tokenizer (token/merge byte-level) + tensori |
+
+**Tre disallineamenti gestiti**: (1) `nn.Linear` `(out,in)` = orientamento diretto,
+niente trasposizione; (2) QKV senza bias → zeri (no-op); (3) bias della testa (mag 0,167)
+scartato. **Verificato**: output Ollama coerente come il PyTorch. Pubblicato
+`ronconiric/ronklm-1:0.05b`.
+
+### 3.24 `data/prepare_corpus.py` — script di preparazione corpus (Percorso A)
 
 Funzioni (tutte a livello di modulo; script eseguibile con `python data/prepare_corpus.py [--force]`):
 
